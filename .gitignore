@@ -1,0 +1,112 @@
+# ---------------------------------------------------------------------------
+# The Lenny Growth Assistant
+#
+# One ignore file for the whole repository. Patterns without a leading slash
+# match at any depth, so `__pycache__/` covers backend/app/**, and `dist/`
+# covers frontend/dist -- there is no need for a second file per package.
+# ---------------------------------------------------------------------------
+
+# ---- Secrets: never commit a real environment file ------------------------
+# `.env.*` also matches `.env.example`, so the placeholder is re-included.
+# These are unanchored, so they apply to backend/, frontend/ and the root.
+.env
+.env.*
+!.env.example
+Assignment.docx
+
+# Credential-shaped files. The application holds an API key; nothing that
+# looks like a private key or a secret bundle should ever be committed.
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+credentials.json
+
+# ---- Python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+eggs/
+*.egg-info/
+.installed.cfg
+
+# Virtual environments. The README uses backend/.venv.
+.venv/
+venv/
+ENV/
+
+# Test / type / lint caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
+.tox/
+.nox/
+.hypothesis/
+
+# Coverage
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# ---- Node / Vite ----------------------------------------------------------
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.tsbuildinfo
+# Vite writes these next to the config when it transpiles it.
+vite.config.*.timestamp-*
+# Vite convention for machine-local overrides (e.g. *.local.ts).
+*.local
+.eslintcache
+
+# Package manager logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.npm/
+
+# ---- Application artefacts ------------------------------------------------
+# Transcript corpus cache, re-created by the ingestion command. Unanchored,
+# so it is ignored whether ingestion is run from backend/ or the repo root.
+.transcript-cache/
+
+# Stray local databases. This project uses PostgreSQL; a .sqlite3 here would
+# be an accident, not an asset.
+*.sqlite3
+*.db
+
+# ---- Tooling --------------------------------------------------------------
+# Claude Code: `settings.local.json` is per-developer. A shared, committed
+# `.claude/settings.json` is deliberately NOT ignored, so project-wide
+# permissions and hooks can be version-controlled.
+.claude/settings.local.json
+.claude/*.local.json
+
+# ---- Editors --------------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ---- OS -------------------------------------------------------------------
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+# Windows
+Thumbs.db
+Desktop.ini

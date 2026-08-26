@@ -1,0 +1,258 @@
+/**
+ * Design tokens and base styles.
+ *
+ * design.md section 24 calls for a consistent design system rather than
+ * per-component styling. Tokens are declared here once; components consume
+ * them. The full component layer lands with the chat UI in Phase 6.
+ */
+
+:root {
+  /* Typography */
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica,
+    Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.5rem;
+  --text-2xl: 2rem;
+
+  /* Spacing scale */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+
+  /* Radii */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+
+  /* Light palette */
+  --color-bg: #fbfbfa;
+  --color-surface: #ffffff;
+  --color-border: #e4e4e1;
+  --color-text: #1c1c1a;
+  --color-text-muted: #6b6b66;
+  --color-accent: #b5501f;
+  --color-ok: #1a7f4b;
+  --color-warn: #9a6410;
+  --color-error: #b3261e;
+  --color-focus: #2563eb;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg: #1a1a19;
+    --color-surface: #232322;
+    --color-border: #3a3a38;
+    --color-text: #f2f2f0;
+    --color-text-muted: #a3a39e;
+    --color-accent: #e08a5a;
+    --color-ok: #4ec37f;
+    --color-warn: #d9a333;
+    --color-error: #f0827c;
+    --color-focus: #7ea6ff;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* design.md section 16: focus must always be clearly visible. */
+:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+.shell {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  align-items: flex-start;
+  max-width: 42rem;
+  margin: 0 auto;
+  padding: var(--space-8) var(--space-4);
+}
+
+.shell h1 {
+  margin: 0;
+  font-size: var(--text-2xl);
+  letter-spacing: -0.02em;
+}
+
+.tagline {
+  margin: 0;
+  color: var(--color-text-muted);
+}
+
+.status {
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  font-size: var(--text-sm);
+}
+
+.status p {
+  margin: 0;
+  display: flex;
+  gap: var(--space-2);
+  align-items: baseline;
+}
+
+/* Colour is reinforced by a glyph, never used alone (design.md section 16). */
+.status-ok {
+  color: var(--color-ok);
+}
+.status-warn {
+  color: var(--color-warn);
+}
+.status-error {
+  color: var(--color-error);
+}
+/* ---------------------------------------------------------------------------
+ * Model selector
+ *
+ * A provider that cannot be used here stays visible and keeps its explanation;
+ * only its affordance is removed. `data-disabled` drives the styling so the
+ * disabled state reads the same whether it came from environment policy or
+ * from an unreachable daemon.
+ * ------------------------------------------------------------------------ */
+
+.panel {
+  margin-top: var(--space-6);
+  padding: var(--space-4);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+}
+
+.muted {
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+
+.model-selector {
+  border: 0;
+  margin: 0;
+  padding: 0;
+}
+
+.model-selector-legend {
+  padding: 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.model-options {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.model-option {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-start;
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition:
+    border-color 120ms ease,
+    background-color 120ms ease;
+}
+
+.model-option:hover:not([data-disabled='true']) {
+  border-color: var(--color-accent);
+}
+
+.model-option[data-selected='true'] {
+  border-color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 8%, transparent);
+}
+
+/* Disabled: dimmed and inert, but still legible and still explained. */
+.model-option[data-disabled='true'] {
+  cursor: not-allowed;
+  opacity: 0.62;
+  background: color-mix(in srgb, var(--color-text-muted) 6%, transparent);
+}
+
+.model-option input {
+  margin: 0;
+  accent-color: var(--color-accent);
+}
+
+.model-option input:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+.model-option-body {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.model-option-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-weight: 600;
+}
+
+.model-option-kind {
+  font-size: var(--text-xs);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-2);
+}
+
+.model-option-model {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+}
+
+.model-option-reason {
+  font-size: var(--text-sm);
+  color: var(--color-warn);
+  max-width: 46ch;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .model-option {
+    transition: none;
+  }
+}
