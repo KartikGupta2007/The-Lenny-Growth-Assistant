@@ -8,11 +8,9 @@
 
 import {
   API_BASE_URL,
-  COPY,
   DEFAULT_TIMEOUT_MS,
   ENDPOINTS,
   ERROR_CODES,
-  ERROR_NAMES,
   type ProviderId,
   type ProviderKind,
 } from '../constants';
@@ -33,7 +31,7 @@ export class ApiError extends Error {
 
   constructor(code: string, message: string, status: number) {
     super(message);
-    this.name = ERROR_NAMES.api;
+    this.name = 'ApiError';
     this.code = code;
     this.status = status;
   }
@@ -42,16 +40,16 @@ export class ApiError extends Error {
 /** Raised when the backend did not answer within the request timeout. */
 export class TimeoutError extends Error {
   constructor() {
-    super(COPY.timedOut);
-    this.name = ERROR_NAMES.timeout;
+    super('The assistant took too long to respond. Please try again.');
+    this.name = 'TimeoutError';
   }
 }
 
 /** Raised when the backend cannot be reached at all. */
 export class NetworkError extends Error {
   constructor() {
-    super(COPY.unreachable);
-    this.name = ERROR_NAMES.network;
+    super('Could not reach the assistant. Check that the backend is running.');
+    this.name = 'NetworkError';
   }
 }
 
@@ -114,7 +112,7 @@ export async function request<T>(
     // failure surface as an unhandled exception.
     throw new ApiError(
       ERROR_CODES.invalidResponse,
-      COPY.unreadableResponse,
+      'The server returned an unreadable response.',
       response.status,
     );
   }
@@ -125,7 +123,7 @@ export async function request<T>(
     }
     throw new ApiError(
       ERROR_CODES.unexpected,
-      COPY.genericFailure,
+      'Something went wrong. Please try again.',
       response.status,
     );
   }

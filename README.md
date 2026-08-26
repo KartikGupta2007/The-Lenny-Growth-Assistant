@@ -10,7 +10,9 @@ Answers cite the episodes they came from, follow-up questions keep session
 context, and the assistant can turn what it finds into a Ship 30 for 30-style
 essay or a rendered Markdown / HTML artifact shown beside the chat.
 
-> **Implementation status — foundation + model provider layer complete.**
+> **Implementation status — foundation, model providers, database schema +
+> persistence, transcript ingestion, embedding generation, and vector retrieval
+> complete.** Answer generation, the agent and chat are not yet built.
 > This README documents only what is actually built and verified. Sections
 > marked *Not yet implemented* are planned but absent. See
 > [Implementation status](#implementation-status) for the full breakdown.
@@ -24,6 +26,7 @@ essay or a rendered Markdown / HTML artifact shown beside the chat.
 | [PRD.md](PRD.md) | Product requirements, scope, success metrics, acceptance criteria |
 | [design.md](design.md) | UI/UX design, information architecture, interaction states |
 | [architecture.md](architecture.md) | System architecture, data model, component boundaries, trade-offs |
+| [evals/](evals/) | Retrieval evaluation set — the foundation for measuring relevance |
 
 ---
 
@@ -160,6 +163,15 @@ curl http://localhost:8000/health
 `/health` returns HTTP 503 with `"status": "degraded"` when a required
 dependency is unreachable, so "up" and "up but unusable" are distinguishable.
 
+`DATABASE_PROBE_TIMEOUT_SECONDS` bounds that check and defaults to 10s, which
+is calibrated for a *remote* database: establishing a pooled TLS connection to
+a managed PostgreSQL in another region measures ~6.5s from a developer machine,
+and a pooled follow-up query ~1.6s. So the first `/health` after startup is
+slow and every one after it is fast. If an orchestrator's health-check timeout
+is tighter than that first connection, warm the pool at startup rather than
+lowering this value — a ceiling below the real connection cost cancels the
+attempt before it can enter the pool, which makes *every* probe fail.
+
 Interactive API docs are served at <http://localhost:8000/docs>.
 
 ---
@@ -202,12 +214,360 @@ absolute URL (the backend's default base URL), one env var
 
 ---
 
-## Constants
+## Ingestion
 
-Every fixed value lives in one module per half of the stack:
+Ingestion is an **explicit offline command**. It is never triggered by a user
+request: the corpus is indexed ahead of time, and a chat request only ever
+embeds the user's own question.
+
+```bash
+cd backend
+source .venv/bin/activate
+
+python -m app.ingestion.sync --limit 10   # first 10 transcripts, for development
+python -m app.ingestion.sync              # the whole corpus (303 episodes)
+python -m app.ingestion.sync --force-sync # re-download the repository
+```
+
+```
+GitHub tarball -> .transcript-cache/ -> parse -> clean -> chunk -> documents + chunks
+```
+
+`chunks.embedding` is left **NULL** — filling it is a separate command, below.
+
+### Pipeline
+
+| Module | Job |
+| --- | --- |
+| [`loader.py`](backend/app/ingestion/loader.py) | Downloads the repo tarball into `TRANSCRIPT_CACHE_DIR`, finds `episodes/*/transcript.md` |
+| [`parser.py`](backend/app/ingestion/parser.py) | YAML frontmatter → metadata, body → cleaned text, file → sha256 |
+| [`chunker.py`](backend/app/ingestion/chunker.py) | Paragraph packing with overlap |
+| [`sync.py`](backend/app/ingestion/sync.py) | CLI, incremental logic, progress logging |
+
+The cache exists so a rerun does not re-download 8 MB. It is an implementation
+detail of ingestion — gitignored, and never exposed through the API.
+
+**Discovery is specific, not greedy.** Only `episodes/*/transcript.md` counts.
+The repository also contains `index/` (91 topic files), `scripts/` and two
+root READMEs, none of which are transcripts.
+
+### Metadata
+
+Taken from each transcript's frontmatter — nothing is invented:
+
+| Column | Source |
+| --- | --- |
+| `title` | `title`, else the `# ` heading, else the episode directory name |
+| `guest` | `guest` |
+| `source_url` | `youtube_url`, else `spotify_url` |
+| `publish_date` | `publish_date` |
+| `source_path` | `episodes/<slug>/transcript.md` |
+| `content_hash` | sha256 of the raw file |
+
+Real gaps in the corpus, handled rather than faked: 4 episodes have no
+`youtube_url`, 3 have no `publish_date`, 1 has no `title`, and 1 uses Spotify
+instead of YouTube. Those columns are nullable and stay null.
+
+### Cleaning
+
+Formatting only — the wording is left alone:
+
+- the `# title` / `## Transcript` header block is dropped
+- `Casey Winters (00:12):` becomes `Casey Winters:` — the timestamp is noise
+  for retrieval, but *who said it* is part of the answer
+- bare `(02:22):` continuation markers are removed
+- non-breaking spaces, trailing whitespace and runs of blank lines are normalised
+
+### Chunking
+
+`CHUNK_TARGET_TOKENS=600`, `CHUNK_OVERLAP_TOKENS=80`.
+
+Whole paragraphs are packed into a chunk until it reaches the target, then the
+tail of that chunk is carried into the next one so a passage split across a
+boundary is retrievable from either side. A paragraph longer than the target is
+split into overlapping windows — one transcript in the corpus is a single
+16,914-word paragraph with no breaks at all, which is why that branch exists.
+
+Words stand in for tokens. A real tokeniser would be more precise, but it is
+another dependency for a bound that only needs to be roughly right: chunks sit
+well inside the embedding model's context either way. In practice this produces
+~28 chunks per episode.
+
+### Incremental refresh
+
+`content_hash` decides the work, per PRD section 9:
+
+| Source state | Action |
+| --- | --- |
+| New transcript | create document, create chunks |
+| Hash unchanged | **skip** — no re-chunking |
+| Hash changed | update document, **replace** its chunks |
+| File gone from the repo | delete document; chunks cascade |
+
+Chunks are replaced rather than updated because boundaries move when the text
+changes, so old chunk indexes cannot be reused.
+
+Each transcript commits in its own transaction, so an interrupted run keeps the
+work it finished and a rerun resumes from there.
+
+**Pruning is skipped under `--limit`.** A limited run only sees the first N
+transcripts, so every transcript past the limit would otherwise look as though
+it had been deleted from the repository.
+
+### Embeddings
+
+A second explicit offline command turns stored chunks into vectors. Ingestion
+creates chunks; this fills in the column it left NULL.
+
+```bash
+python -m app.ingestion.embed --limit 32   # only the corpus's first 32 chunks
+python -m app.ingestion.embed              # every chunk without an embedding
+```
+
+```
+chunks WHERE embedding IS NULL → Ollama nomic-embed-text → vector(768) → chunks.embedding
+```
+
+- **Ollama provides embeddings locally.** No API key, no cloud egress, no
+  per-token cost for indexing the corpus.
+- **`nomic-embed-text` produces 768-dimensional vectors**, stored in Neon
+  PostgreSQL via pgvector.
+- **Only chunks where `embedding IS NULL` are read.** A normal user query never
+  regenerates the corpus — that would be the query's own embedding, which is
+  the retrieval phase.
+- **Batched.** `EMBEDDING_BATCH_SIZE=32` chunks go to Ollama in one request via
+  `/api/embed`, never one request per chunk. The final short batch is handled.
+- **Validated before storage.** Every returned vector must be exactly
+  `Settings.embedding_dimensions` wide — derived from `EMBEDDING_MODEL`, not
+  hard-coded. A wrong width raises rather than writing a corrupt vector.
+
+**What `--limit N` means:** the run is scoped to the **first N chunks in corpus
+order**, and of those, only the ones still missing an embedding are sent. It is
+not "N units of work". That distinction matters: rerunning the same limit is a
+no-op rather than a step through the backlog, so the command is idempotent at
+every limit and not only on a full run.
+
+```
+first run   --limit 3  → embedded 3
+rerun       --limit 3  → embedded 0   (nothing left in that window)
+widen       --limit 10 → embedded 7   (the first 3 are not redone)
+```
+
+**Failure is explicit.** Each batch commits on its own, so an interrupted run
+keeps what succeeded and leaves the rest NULL for a rerun to finish. A failure
+prints the reason and exits non-zero — it never reports success:
+
+```
+Embedding failed: Ollama is not reachable. Start it with `brew services start ollama`.
+Embedding failed: Ollama rejected the request: model X is not installed. Pull it with `ollama pull X`.
+```
+
+### Retrieval
+
+```
+query → query embedding → pgvector cosine search → relevance threshold → top-k chunks + provenance
+```
+
+Retrieval finds evidence. It does **not** generate an answer — that is the next
+phase.
+
+```bash
+cd backend
+python -m app.retrieval.search "how should a startup think about product-market fit?"
+```
+
+That CLI is a debug tool, not API surface. Retrieval is a callable service
+([`app/retrieval/retriever.py`](backend/app/retrieval/retriever.py)) which the
+agent layer will use:
+
+```python
+result = await retrieve(session, "how do I improve retention?")
+result.sufficient   # False when there is too little relevant material
+result.chunks        # ordered nearest-first, each with full provenance
+```
+
+**Document embeddings are generated offline; query embeddings at query time.**
+A question embeds only itself — one small Ollama call — and the corpus is never
+re-embedded to answer it.
+
+**pgvector performs the search.** The `ORDER BY embedding <=> :query LIMIT k` is
+served by the HNSW index; no embeddings are loaded into Python and no cosine
+similarity is computed there. Confirmed with `EXPLAIN`:
+
+```
+Limit
+  ->  Index Scan using ix_chunks_embedding_hnsw on chunks
+        Order By: (embedding <=> '[...]'::vector)
+```
+
+The `RETRIEVAL_MAX_DISTANCE` filter rides along as a filter over that ordered
+scan — also verified with `EXPLAIN` to keep using the index. It is safe in SQL
+because rows arrive in distance order, so nothing past the threshold could have
+matched.
+
+**Each result carries what a citation needs:** `chunk_id`, `document_id`,
+`content`, `chunk_index`, `distance`, `title`, `guest`, `source_url`,
+`source_path`.
+
+### Insufficient evidence
+
+Two settings decide whether the evidence is good enough:
+
+| Setting | Effect |
+| --- | --- |
+| `RETRIEVAL_TOP_K=8` | at most 8 chunks |
+| `RETRIEVAL_MAX_DISTANCE=0.45` | chunks farther than this cosine distance are dropped |
+| `RETRIEVAL_MIN_CHUNKS=2` | fewer than this many survivors ⇒ `sufficient: False` |
+
+**Insufficient evidence is preferred over unsupported retrieval.** An
+off-corpus question returns `sufficient: False` rather than the nearest vector
+dressed up as an answer. The result still carries whatever was found so the
+caller can log the near-miss — it just must not answer from it.
+
+The threshold was **measured, not guessed.** Against [`evals/`](evals/) on the
+full 9,842-chunk corpus, the best match for a question the corpus answers sits
+at 0.18–0.37; for an off-corpus question it sits at 0.49–0.52. `0.45` falls in
+the empty band between the two:
+
+| threshold | on-corpus hits | off-corpus refused |
+| --- | --- | --- |
+| 0.62 *(original)* | 11/20 | **0/3** |
+| 0.50 | 11/20 | 2/3 |
+| **0.45** | **11/20** | **3/3** |
+| 0.40 | 10/20 | 3/3 |
+
+At 0.62 nothing was ever refused — with ~10k chunks, *something* is always
+within 0.62, which made insufficient-evidence unreachable in practice.
+
+---
+
+## Database
+
+PostgreSQL with pgvector holds two groups of data that are deliberately
+unrelated: a conversation does not own transcript rows, and re-ingesting the
+corpus does not touch anybody's conversation.
+
+```
+APPLICATION                          KNOWLEDGE BASE
+
+users                                documents
+  └── sessions                         └── chunks
+        ├── messages                         └── embedding vector(768)
+        └── artifacts ──┐
+                        │
+        messages ───────┘  (nullable: which turn produced the artifact)
+```
+
+| Table | Holds | Key constraints |
+| --- | --- | --- |
+| `users` | Anonymous user + JSONB `metadata` | — |
+| `sessions` | One conversation | `user_id` → users, **CASCADE** |
+| `messages` | One turn: `role`, `content` | `session_id` → sessions **CASCADE**; `role` CHECK-constrained to user/assistant/system |
+| `artifacts` | Generated Markdown or HTML | `session_id` **CASCADE**; `message_id` **SET NULL**; `type` CHECK-constrained to markdown/html |
+| `documents` | One episode transcript + provenance | `source_path` **UNIQUE** (stable identity); `content_hash` indexed |
+| `chunks` | A retrievable slice + its embedding | `document_id` **CASCADE**; `(document_id, chunk_index)` **UNIQUE**; HNSW index on `embedding` |
+
+Decisions worth knowing:
+
+- **UUID primary keys.** An anonymous user's id is minted by the client and
+  kept in its own browser, so an id must be generatable without a database
+  round-trip.
+- **`documents.source_path` is the identity, not `content_hash`.** The path is
+  what survives a re-ingest. `content_hash` is indexed but *not* unique: two
+  episodes with identical text would be surprising, not a constraint violation,
+  and failing an ingest over it would be wrong. `DocumentRepository.upsert`
+  returns `(document, changed)` — `changed` is the signal that makes refresh
+  incremental.
+- **`messages.created_at` defaults to `clock_timestamp()`, not `now()`.**
+  `now()` returns the *transaction* start time, so a user turn and the
+  assistant reply written in one request would share a timestamp and the
+  conversation could come back reversed. Reads order by `(created_at, id)` so
+  the ordering is total.
+- **`artifacts.message_id` is SET NULL, not CASCADE.** Deleting a message
+  should not destroy a document the user may still have open beside the chat.
+- **HNSW, not IVFFlat, for the vector index.** IVFFlat derives its lists from
+  the rows present when the index is built, and the table is empty at migration
+  time, so it would build a useless index. Cosine distance, matching
+  `RETRIEVAL_MAX_DISTANCE`.
+- **The vector width comes from `Settings.embedding_dimensions`**, in both the
+  model and the migration — never a literal. A database built from the
+  migration therefore always matches the configured `EMBEDDING_MODEL`. The
+  consequence is deliberate: changing `EMBEDDING_MODEL` against an *existing*
+  database needs its own migration plus a re-ingest, because the stored vectors
+  are the wrong width.
+- **Timestamps are all `TIMESTAMP WITH TIME ZONE`**, asserted by a test that
+  fails on any timezone-naive column.
+
+### Migrations
+
+Alembic is the source of truth. `create_all()` is never called — not in the
+app, not in tests — so the schema a developer has is the schema the migrations
+produce.
+
+```bash
+cd backend
+python -m alembic upgrade head      # apply
+python -m alembic current           # what is applied
+python -m alembic downgrade base    # back out (reversible)
+python -m alembic upgrade head --sql  # review the SQL without running it
+```
+
+The DSN is **not** in `alembic.ini`. `alembic/env.py` reads it from application
+settings, so one place knows it and no credential is committed.
+
+`tests/test_migrations.py` compares the migrated database against the models
+and fails on any difference. Without that test, editing a model without writing
+its migration would pass every other test in the suite — because those tests
+run on a schema built by the same missing migration — and then fail on deploy.
+
+### Repositories
+
+No route handler builds a query. `app/db/repositories/` owns all SQL:
+
+| Repository | Operations |
+| --- | --- |
+| `UserRepository` | `create`, `get`, `get_or_create` |
+| `SessionRepository` | `create`, `get`, `list_by_user`, `touch` |
+| `MessageRepository` | `create`, `list_by_session` |
+| `ArtifactRepository` | `create`, `get`, `list_by_session` |
+| `DocumentRepository` | `create`, `upsert`, `get`, `get_by_source_path`, `list_by_content_hash`, `mark_ingested` |
+| `ChunkRepository` | `bulk_insert`, `list_by_document`, `count_by_document`, `delete_by_document` |
+
+Repositories do not own transactions. `app.db.session.get_session` commits on a
+successful request and rolls back on failure, so a handler can call several
+repositories and get one atomic unit of work. Repositories only `flush`, and
+only when they need the database to assign something before returning.
+
+`SessionRepository.touch` issues an explicit `UPDATE` rather than mutating a
+loaded row: the ORM's `onupdate` fires only when some other column changed, so
+adding a message to a conversation would otherwise leave `updated_at` stale and
+break the sidebar's ordering.
+
+---
+
+## Constants
 
 | File | Holds |
 | --- | --- |
+| [`backend/app/constants.py`](backend/app/constants.py) | Provider ids, error codes, routes, message roles, artifact types, and configuration defaults |
+| [`frontend/src/constants.ts`](frontend/src/constants.ts) | The frontend half of those contracts |
+
+The rule is *shared or contractual*, not *every literal*. A value used once and
+obvious from its call site stays where it is used — a one-off HTTP path, an SQL
+string, a column length. Table names live on the model's `__tablename__`, UI
+copy lives in the component that renders it, and error messages stay on the
+exception class in `app/errors.py` because the message is part of that class's
+contract. Environment-driven configuration lives in
+[`config.py`](backend/app/config.py); `constants.py` holds only its defaults.
+
+Provider ids, error codes and route paths appear on **both** sides. Those are
+API contracts, and changing one alone breaks the pair silently — the UI stops
+matching a code, or requests a route that no longer exists.
+`tests/test_constants.py` parses `constants.ts` and asserts the two agree, so
+drift fails the test suite instead of the browser. It also asserts that no
+module outside `config.py` reads the environment.
+
+--- | --- |
 | [`backend/app/constants.py`](backend/app/constants.py) | Every literal the backend uses: defaults, routes, error codes, provider ids and labels, security headers, SQL, log keys |
 | [`frontend/src/constants.ts`](frontend/src/constants.ts) | The frontend equivalent, plus all fixed UI copy |
 
@@ -321,7 +681,7 @@ source .venv/bin/activate
 python -m pytest
 ```
 
-Current state — **63 tests, all passing**:
+Current state — **127 tests, all passing**:
 
 | File | Covers |
 | --- | --- |
@@ -329,14 +689,41 @@ Current state — **63 tests, all passing**:
 | `tests/test_config.py` | Embedding-dimension derivation, unmapped-model failure, list parsing (CSV + JSON), env policy switches, production CORS guard, secret redaction in `repr` |
 | `tests/test_providers.py` | Provider availability in each environment, Ollama disabled but still reported in production, default fallback, server-side rejection, missing/blank API key, Ollama tag matching, `GET /api/providers` payload |
 | `tests/test_constants.py` | Backend/frontend constant drift (provider ids, kinds, error codes, routes), immutable shared containers, no `os.environ` read outside `config.py` |
+| `tests/test_persistence.py` | Every repository against real PostgreSQL: users, sessions, messages and their ordering, artifacts, documents, content-hash lookup and upsert semantics, chunks, provenance join, the vector column, cascades and foreign keys |
+| `tests/test_migrations.py` | Zero drift between migrations and models, single head, tables, foreign-key delete actions, indexes, HNSW method and operator class, pgvector extension, timezone-aware timestamps |
+| `tests/test_ingestion.py` | Discovery (and what it ignores), frontmatter parsing, metadata gaps, cleaning, chunk order/overlap/determinism, oversized paragraphs, invalid transcripts, content hashing, skip-unchanged, reprocess-changed, removal cleanup, `--limit` behaviour, NULL embeddings |
+| `tests/test_embeddings.py` | Provider batching and dimension validation, unreachable/timeout/missing-model errors, no credentials in errors, NULL-only selection, persistence, idempotence, `--limit` window semantics, per-batch failure safety |
+| `tests/test_retrieval.py` | Query embedded (and only the query), exact cosine distances, ordering, `top_k`, threshold filtering, minimum-chunk rule, insufficient evidence, provenance, HNSW index used, corpus unmodified, provider failure propagation |
 
 The frontend has its own gate, run by `npm run lint` and `npm run build`:
 `scripts/check-boundary.mjs` — see [The frontend boundary](#the-frontend-boundary).
 
-The tests use a separate `lenny_growth_assistant_test` database, stub the
-Ollama probe, and contact no cloud provider — so they pass on a machine with
-no daemon running. Settings are built with `_env_file=None`, so a local
-`backend/.env` cannot change what the suite asserts.
+Model-provider tests stub the Ollama probe and contact no cloud provider, so
+they pass on a machine with no daemon running. Settings are built with
+`_env_file=None`, so a local `backend/.env` cannot change what the suite
+asserts.
+
+**Database tests run against real PostgreSQL and are never skipped.** The point
+of the schema is its constraints, cascades and vector column, and none of those
+exist in a stand-in — while a skipped constraint test is indistinguishable from
+a passing one in CI output. An unreachable database fails the run with the
+command needed to fix it.
+
+The suite picks its database in this order:
+
+```bash
+# 1. An explicit test database — point this at a Neon test branch to run
+#    against the same engine production uses.
+TEST_DATABASE_URL=postgresql+psycopg://user:pw@host/db python -m pytest
+
+# 2. Otherwise a local lenny_growth_assistant_test
+python -m pytest
+```
+
+`DATABASE_URL` is *overwritten* in the test environment rather than defaulted,
+so the suite can never reach the application database in `backend/.env` — these
+fixtures create and drop schema. Each test runs inside a transaction that is
+rolled back, so the schema is migrated once per session rather than per test.
 
 ---
 
@@ -348,10 +735,11 @@ Phases follow the plan in [PRD.md](PRD.md) section 23.
 | --- | --- | --- |
 | 1 | Repo structure, FastAPI app, config, DB connection, logging, error contract, health endpoint, frontend scaffold, first tests | **Complete** |
 | 1b | Model provider abstraction, availability probing, environment policy, `GET /api/providers`, frontend model selector | **Complete** |
-| 2 | Database schema; anonymous user / session / message persistence | Not yet implemented |
-| 3 | Transcript ingestion: repo sync, parsing, cleaning, chunking, embeddings, incremental refresh | Not yet implemented |
-| 4 | Retrieval: query embedding, pgvector search, provenance, grounded context | Not yet implemented |
-| 5 | Agent layer, RAG tool, generation on the existing provider abstraction | Not yet implemented |
+| 2 | Database schema, Alembic migrations, repository layer, persistence tests | **Complete** |
+| 3 | Transcript ingestion: repo sync, parsing, cleaning, chunking, incremental refresh | **Complete** |
+| 3b | Embedding generation: local Ollama, batched, validated, incremental | **Complete** |
+| 4 | Retrieval: query embedding, pgvector similarity search, relevance threshold, provenance | **Complete** |
+| 5 | Agent layer, RAG tool, grounded generation on the existing provider abstraction | Not yet implemented |
 | 6 | Chat API, conversational UI, source display, provider selection | Not yet implemented |
 | 7 | Ship 30 for 30 skill, artifact generation, artifact viewer, HTML sanitisation | Not yet implemented |
 | 8 | Error handling hardening, observability, full test suite | Not yet implemented |
@@ -411,7 +799,9 @@ the-lenny-growth-assistant/
 │   │   ├── http.py           # one pooled outbound HTTP client
 │   │   ├── api/              # HTTP routes only — health, providers
 │   │   ├── models/           # provider abstraction: base, ollama, cloud, registry
-│   │   └── db/               # session, engines, connectivity probe
+│   │   └── db/               # base, models, session, repositories/
+│   ├── alembic/              # migration environment + versions/
+│   ├── alembic.ini
 │   └── tests/
 └── frontend/
     ├── .env.example, package.json
@@ -424,8 +814,8 @@ the-lenny-growth-assistant/
 ```
 
 Only what is built is present. The packages for the remaining phases
-(`retrieval/`, `ingestion/`, `agent/`, `artifacts/`, `db/repositories/`) are
-created when the code that fills them is written, rather than sitting empty.
+(`retrieval/`, `ingestion/`, `agent/`, `artifacts/`) are created when the code
+that fills them is written, rather than sitting empty.
 
 ---
 

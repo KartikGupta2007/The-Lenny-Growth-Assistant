@@ -14,16 +14,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { fetchProviders, type ProviderStatus } from '../api/client';
-import {
-  COPY,
-  isProviderId,
-  STORAGE_KEYS,
-  type ProviderId,
-} from '../constants';
+import { isProviderId, type ProviderId } from '../constants';
+
+const STORAGE_KEY = 'lga.selected-provider';
 
 function readStoredProvider(): ProviderId | null {
   try {
-    const value = localStorage.getItem(STORAGE_KEYS.selectedProvider);
+    const value = localStorage.getItem(STORAGE_KEY);
     return isProviderId(value) ? value : null;
   } catch {
     // Private browsing / disabled site data. Selection just does not persist.
@@ -33,7 +30,7 @@ function readStoredProvider(): ProviderId | null {
 
 function storeProvider(id: ProviderId): void {
   try {
-    localStorage.setItem(STORAGE_KEYS.selectedProvider, id);
+    localStorage.setItem(STORAGE_KEY, id);
   } catch {
     // Non-fatal: the session still works, it just will not be remembered.
   }
@@ -82,7 +79,9 @@ export function useProviders(): UseProviders {
         setState({
           status: 'error',
           message:
-            error instanceof Error ? error.message : COPY.providersFailed,
+            error instanceof Error
+              ? error.message
+              : 'Could not load the available models.',
         });
       });
 

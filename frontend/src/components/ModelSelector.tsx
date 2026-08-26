@@ -12,13 +12,7 @@
  */
 
 import type { ProviderStatus } from '../api/client';
-import {
-  COPY,
-  MODEL_RADIO_GROUP_NAME,
-  PROVIDER_KIND_LABELS,
-  PROVIDER_REASON_ID_PREFIX,
-  type ProviderId,
-} from '../constants';
+import { PROVIDER_KIND_LABELS, type ProviderId } from '../constants';
 
 interface ModelSelectorProps {
   providers: ProviderStatus[];
@@ -36,12 +30,12 @@ export function ModelSelector({
 }: ModelSelectorProps) {
   return (
     <fieldset className="model-selector" disabled={busy}>
-      <legend className="model-selector-legend">{COPY.modelLegend}</legend>
+      <legend className="model-selector-legend">Model</legend>
 
       <div className="model-options">
         {providers.map((provider) => {
           const disabled = !provider.available;
-          const reasonId = `${PROVIDER_REASON_ID_PREFIX}-${provider.id}`;
+          const reasonId = `provider-reason-${provider.id}`;
 
           return (
             <label
@@ -52,7 +46,7 @@ export function ModelSelector({
             >
               <input
                 type="radio"
-                name={MODEL_RADIO_GROUP_NAME}
+                name="model-provider"
                 value={provider.id}
                 checked={selected === provider.id}
                 disabled={disabled}

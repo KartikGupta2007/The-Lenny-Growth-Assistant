@@ -1,21 +1,17 @@
-"""Environment-driven application configuration.
+"""Environment-driven configuration.
 
-All tunable behaviour of the backend is expressed here so that no module needs
-to read ``os.environ`` directly. Every literal default comes from
-``app.constants``; this module owns *how* settings are parsed and validated,
-not *what* the values are.
+Everything tunable is declared here so no other module reads os.environ.
+Defaults come from constants.py. Secrets are SecretStr so an accidental log of
+the settings object cannot leak them.
 
-Secrets are held as ``SecretStr`` so that an accidental ``repr``/log of the
-settings object cannot leak them, and are only unwrapped at the point of use.
-
-The ``.env`` file is resolved relative to the ``backend/`` package rather than
-the process working directory, so ``uvicorn app.main:app`` behaves identically
-whether it is launched from the repository root or from ``backend/``.
+The .env path is resolved from the backend/ package rather than the working
+directory, so `uvicorn app.main:app` behaves the same from either.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 from functools import lru_cache
 from typing import Annotated
 
@@ -23,12 +19,11 @@ from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from app.constants import (
-    DEFAULT_ALLOWED_HOSTS,
+    API_PREFIX,
+    APP_VERSION,
+    BACKEND_DIR,
     DEFAULT_ANTHROPIC_MODEL,
     DEFAULT_ANTHROPIC_TIMEOUT_SECONDS,
-    DEFAULT_API_PREFIX,
-    DEFAULT_APP_ENV,
-    DEFAULT_APP_VERSION,
     DEFAULT_CHUNK_OVERLAP_TOKENS,
     DEFAULT_CHUNK_TARGET_TOKENS,
     DEFAULT_CORS_ORIGINS,
@@ -40,7 +35,6 @@ from app.constants import (
     DEFAULT_EMBEDDING_TIMEOUT_SECONDS,
     DEFAULT_HTTP_MAX_CONNECTIONS,
     DEFAULT_LLM_PROVIDER,
-    DEFAULT_LOG_LEVEL,
     DEFAULT_OLLAMA_BASE_URL,
     DEFAULT_OLLAMA_MODEL,
     DEFAULT_OLLAMA_TIMEOUT_SECONDS,
@@ -53,13 +47,6 @@ from app.constants import (
     DEFAULT_TRANSCRIPT_REPO,
     DEFAULT_TRANSCRIPT_REPO_REF,
     EMBEDDING_DIMENSIONS,
-    ENV_FILE,
-    ENV_PRODUCTION,
-    MAX_COSINE_DISTANCE,
-    PSYCOPG_DRIVER_FRAGMENT,
-    VALID_LOG_LEVELS,
-    WILDCARD,
-    ASYNCPG_DRIVER_FRAGMENT,
     EmbeddingProviderId,
     Environment,
     LLMProviderId,
@@ -67,60 +54,49 @@ from app.constants import (
 
 
 class Settings(BaseSettings):
-    """Backend settings, loaded from the environment and ``backend/.env``."""
+    """Backend settings, loaded from the environment and backend/.env."""
 
     model_config = SettingsConfigDict(
-        env_file=ENV_FILE,
+        env_file=BACKEND_DIR / ".env",
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
-        # `.env.example` ships keys with no value (DATABASE_URL=,
-        # ANTHROPIC_API_KEY=) as placeholders. Without this, copying it to
-        # .env would set them to "" and override the defaults with an invalid
-        # DSN and an empty credential. An empty value means "unset".
+        # .env.example ships placeholder keys with no value; an empty value
+        # must mean "unset" rather than override the default with "".
         env_ignore_empty=True,
     )
 
     # ---- Application ----
-    app_env: Environment = DEFAULT_APP_ENV
-    app_version: str = DEFAULT_APP_VERSION
-    log_level: str = DEFAULT_LOG_LEVEL
-    api_prefix: str = DEFAULT_API_PREFIX
+    app_env: Environment = "development"
+    app_version: str = APP_VERSION
+    log_level: str = "INFO"
+    api_prefix: str = API_PREFIX
 
-    # ``NoDecode`` stops pydantic-settings from JSON-decoding the raw value
-    # before validation, so the documented comma-separated form in
-    # .env.example parses instead of raising a JSONDecodeError at startup.
+    # NoDecode stops pydantic-settings JSON-decoding the raw value before
+    # validation, so the comma-separated form in .env.example parses.
     cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: list(DEFAULT_CORS_ORIGINS)
     )
-    # Host header allow-list. "*" is acceptable behind a trusted proxy that
-    # already terminates and validates the host; set it explicitly otherwise.
+    # "*" is fine behind a proxy that already validates the Host header.
     allowed_hosts: Annotated[list[str], NoDecode] = Field(
-        default_factory=lambda: list(DEFAULT_ALLOWED_HOSTS)
+        default_factory=lambda: ["*"]
     )
-    # Interactive API docs. ``None`` means "on everywhere except production".
+    # None means "on everywhere except production".
     enable_docs: bool | None = None
 
     # ---- Database ----
-    # No username: psycopg falls back to the OS user, which is how a Homebrew
-    # PostgreSQL install is provisioned. Managed/Linux instances usually need
-    # an explicit ``user:password@`` prefix.
+    # No username: psycopg falls back to the OS user, which is how Homebrew
+    # provisions PostgreSQL. Managed instances need an explicit user:password@.
     database_url: str = DEFAULT_DATABASE_URL
-    # Health checks must never hang behind a dead socket.
     database_probe_timeout_seconds: float = Field(
         default=DEFAULT_DATABASE_PROBE_TIMEOUT_SECONDS, gt=0
     )
 
     # ---- LLM providers ----
-    # Which provider generates by default. The frontend may override this
-    # per-request, but the server only honours a provider that is actually
-    # selectable in this environment (see app/models/registry.py).
     llm_provider: LLMProviderId = DEFAULT_LLM_PROVIDER
 
-    # Local providers (Ollama) are unavailable in production by default: the
-    # hosted environment has no GPU/RAM budget for a local model, per
-    # architecture.md section 22. ``None`` means "derive from app_env"; set it
-    # explicitly to true for a self-hosted deployment that does run Ollama.
+    # Local providers are unavailable in production by default: the hosted API
+    # has no Ollama daemon. Set explicitly for a self-hosted deployment.
     enable_local_providers: bool | None = None
 
     ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL
@@ -135,8 +111,6 @@ class Settings(BaseSettings):
         default=DEFAULT_ANTHROPIC_TIMEOUT_SECONDS, gt=0
     )
 
-    # Availability probing. Probes run on the request path, so they use a short
-    # timeout and their result is cached for the TTL below.
     provider_probe_timeout_seconds: float = Field(
         default=DEFAULT_PROVIDER_PROBE_TIMEOUT_SECONDS, gt=0
     )
@@ -144,10 +118,8 @@ class Settings(BaseSettings):
         default=DEFAULT_PROVIDER_STATUS_TTL_SECONDS, ge=0
     )
 
-    # ---- Embedding provider ----
-    # Always Ollama: embeddings stay local, so ingesting the corpus needs no
-    # API key and costs nothing. This is independent of LLM_PROVIDER, which
-    # may still be a cloud model.
+    # ---- Embeddings ----
+    # Always Ollama, independent of llm_provider, so ingestion needs no key.
     embedding_provider: EmbeddingProviderId = DEFAULT_EMBEDDING_PROVIDER
     embedding_model: str = DEFAULT_EMBEDDING_MODEL
     embedding_batch_size: int = Field(default=DEFAULT_EMBEDDING_BATCH_SIZE, gt=0)
@@ -155,7 +127,7 @@ class Settings(BaseSettings):
         default=DEFAULT_EMBEDDING_TIMEOUT_SECONDS, gt=0
     )
 
-    # ---- Knowledge base / ingestion ----
+    # ---- Ingestion ----
     transcript_repo: str = DEFAULT_TRANSCRIPT_REPO
     transcript_repo_ref: str = DEFAULT_TRANSCRIPT_REPO_REF
     transcript_cache_dir: str = DEFAULT_TRANSCRIPT_CACHE_DIR
@@ -165,7 +137,7 @@ class Settings(BaseSettings):
     # ---- Retrieval ----
     retrieval_top_k: int = Field(default=DEFAULT_RETRIEVAL_TOP_K, gt=0)
     retrieval_max_distance: float = Field(
-        default=DEFAULT_RETRIEVAL_MAX_DISTANCE, gt=0, le=MAX_COSINE_DISTANCE
+        default=DEFAULT_RETRIEVAL_MAX_DISTANCE, gt=0, le=2.0
     )
     retrieval_min_chunks: int = Field(default=DEFAULT_RETRIEVAL_MIN_CHUNKS, gt=0)
 
@@ -175,12 +147,7 @@ class Settings(BaseSettings):
     @field_validator("cors_origins", "allowed_hosts", mode="before")
     @classmethod
     def _split_list(cls, value: object) -> object:
-        """Accept a comma-separated string, a JSON array, or a real list.
-
-        Environment variables are strings, and both ``a,b`` and ``["a","b"]``
-        are natural things to write in a .env file or a deployment console, so
-        both are accepted rather than only the JSON form.
-        """
+        """Accept a comma-separated string, a JSON array, or a list."""
         if not isinstance(value, str):
             return value
         text = value.strip()
@@ -194,17 +161,15 @@ class Settings(BaseSettings):
     @field_validator("log_level")
     @classmethod
     def _validate_log_level(cls, value: str) -> str:
-        """Reject a misspelled level instead of silently falling back to INFO."""
+        """Reject a misspelled level instead of falling back to INFO."""
         level = value.upper()
-        if level not in VALID_LOG_LEVELS:
-            known = ", ".join(sorted(VALID_LOG_LEVELS))
-            raise ValueError(f"Invalid LOG_LEVEL {value!r}. Expected one of: {known}")
+        if not isinstance(logging.getLevelName(level), int):
+            raise ValueError(f"Invalid LOG_LEVEL {value!r}")
         return level
 
     @field_validator("api_prefix")
     @classmethod
     def _normalise_prefix(cls, value: str) -> str:
-        """Guarantee a leading slash and no trailing slash."""
         prefix = "/" + value.strip("/")
         return "" if prefix == "/" else prefix
 
@@ -226,22 +191,16 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _production_guardrails(self) -> Settings:
-        """Fail fast on configurations that are unsafe once deployed."""
-        if self.app_env != ENV_PRODUCTION:
-            return self
-        if WILDCARD in self.cors_origins:
+        if self.is_production and "*" in self.cors_origins:
             raise ValueError(
                 "CORS_ORIGINS must list explicit origins in production; "
-                f"{WILDCARD!r} would let any site call the API."
+                "'*' would let any site call the API."
             )
         return self
 
-    # ---- Derived values ----
-
     @property
     def is_production(self) -> bool:
-        """Whether this process is running as a deployed instance."""
-        return self.app_env == ENV_PRODUCTION
+        return self.app_env == "production"
 
     @property
     def docs_enabled(self) -> bool:
@@ -252,12 +211,10 @@ class Settings(BaseSettings):
 
     @property
     def local_providers_enabled(self) -> bool:
-        """Whether locally hosted model providers may be selected at all.
+        """Whether a locally hosted provider may be selected.
 
-        This is a *policy* decision, distinct from whether Ollama happens to be
-        reachable. In production the local provider is reported to the UI but
-        marked unselectable, so the option stays visible and explained rather
-        than silently disappearing.
+        Policy, not reachability: in production Ollama is still reported to the
+        UI, but marked unselectable rather than silently dropped.
         """
         if self.enable_local_providers is not None:
             return self.enable_local_providers
@@ -272,15 +229,22 @@ class Settings(BaseSettings):
             known = ", ".join(sorted(EMBEDDING_DIMENSIONS))
             raise ValueError(
                 f"Unknown embedding model {self.embedding_model!r}. "
-                f"Add its dimension to EMBEDDING_DIMENSIONS. Known models: {known}"
+                f"Add its dimension to EMBEDDING_DIMENSIONS. Known: {known}"
             ) from exc
 
     @property
-    def sync_database_url(self) -> str:
-        """Blocking driver URL, used by ingestion and schema creation."""
-        return self.database_url.replace(
-            ASYNCPG_DRIVER_FRAGMENT, PSYCOPG_DRIVER_FRAGMENT
-        )
+    def sqlalchemy_url(self) -> str:
+        """DSN pinned to psycopg 3, used by both the async and sync engines.
+
+        A bare postgresql:// DSN -- what Neon's console hands you -- makes
+        SQLAlchemy reach for psycopg2, which this project does not install.
+        """
+        url = self.database_url
+        if "+asyncpg" in url:
+            return url.replace("+asyncpg", "+psycopg")
+        if url.startswith("postgresql://"):
+            return url.replace("postgresql://", "postgresql+psycopg://", 1)
+        return url
 
 
 @lru_cache(maxsize=1)

@@ -263,42 +263,55 @@ Transcript Parser
 
 8. Ingestion Pipeline
 
-8.1 Repository synchronization
+Implemented. backend/app/ingestion/ -- loader.py, parser.py, chunker.py, sync.py.
 
-The ingestion service reads the transcript repository and identifies transcript files.
+Ingestion is an explicit offline command, never part of a user request:
 
-The application should not download and process the entire repository for every user query.
+    python -m app.ingestion.sync --limit 10
+    python -m app.ingestion.sync
 
-Instead, ingestion is an explicit operation:
+GitHub tarball
+       |
+       v
+.transcript-cache/          (reused across runs; gitignored)
+       |
+       v
+discover episodes/*/transcript.md
+       |
+       v
+parse frontmatter -> title, guest, youtube_url, publish_date
+       |
+       v
+clean body -> drop header block, drop timestamps, normalise whitespace
+       |
+       v
+chunk -> paragraph packing with overlap
+       |
+       v
+documents + chunks in PostgreSQL      (embedding stays NULL)
 
-python -m app.ingestion.sync
+The repository is fetched as a tarball rather than cloned: one HTTP request, no
+git dependency, and nothing to keep in sync. It is extracted with tarfile's
+"data" filter, which rejects absolute paths and traversal entries.
 
-⸻
+Discovery is deliberately narrow. Only episodes/*/transcript.md is a
+transcript; the repository also holds index/ (91 topic files), scripts/ and two
+root README files. A file that cannot be parsed is logged as
+transcript_unreadable, counted as failed, and skipped -- one bad transcript
+does not abandon the other 302.
 
-8.2 Metadata extraction
+Metadata comes from the frontmatter and nothing is invented. Where the corpus
+has genuine gaps -- 4 episodes without youtube_url, 3 without publish_date, 1
+without title, 1 with a Spotify link instead -- the columns are nullable and
+stay null. Title falls back to the body heading, then the episode directory
+name.
 
-Each transcript is parsed into a document record containing metadata such as:
+Each transcript is committed in its own transaction, so an interrupted run
+keeps what it finished and a rerun resumes from there.
 
-document_id
-guest
-episode_title
-publish_date
-youtube_url
-description
-source_url
-content_hash
+Embeddings are not generated here. That is the next phase; chunks are written
+with a NULL embedding and the column is populated separately.
 
-The original source metadata is preserved so retrieved content can be traced back to the episode.
-
-⸻
-
-8.3 Transcript cleaning
-
-The raw Markdown is converted into normalized text while preserving useful structure.
-
-The cleaning stage should remove unnecessary formatting noise without removing information that could be useful for retrieval.
-
-⸻
 
 9. Chunking Strategy
 
@@ -327,36 +340,69 @@ Where practical, chunk boundaries should preserve coherent conversational ideas 
 
 10. Embedding Architecture
 
-Each transcript chunk is converted into a vector representation.
+Implemented. backend/app/embeddings.py and backend/app/ingestion/embed.py.
 
-Transcript Chunk
-       │
-       ▼
-Embedding Provider
-       │
-       ▼
-Vector
-       │
-       ▼
-PostgreSQL / pgvector
+    chunks WHERE embedding IS NULL
+              |
+              v
+    batches of EMBEDDING_BATCH_SIZE
+              |
+              v
+    Ollama /api/embed  (nomic-embed-text)
+              |
+              v
+    validate width == Settings.embedding_dimensions
+              |
+              v
+    UPDATE chunks SET embedding = ...
 
-The embedding provider is independent of the LLM provider: generation may be
-local or cloud, embeddings are always local.
+Provider boundary:
 
-Embeddings run on Ollama (`nomic-embed-text`, 768 dimensions). The model is
-274 MB — two orders of magnitude smaller than the 4.9 GB generation model — so
-running it locally costs little, while removing API keys, cloud egress and
-per-token cost from the ingestion path entirely.
+    EmbeddingProvider (abstract)
+              |
+              v
+    OllamaEmbeddingProvider
 
-Consequence for deployment: query embedding happens on the request path, so a
-deployed instance still needs an Ollama endpoint reachable at
-OLLAMA_BASE_URL — one hosting only the embedding model. This is a much smaller
-requirement than hosting the generation model, which is why the LLM provider
-falls back to cloud in production while embeddings do not.
+One provider today. The abstraction exists because the architecture keeps the
+embedding provider replaceable, not because there is a second one -- so it is
+an abstract class with one method, embed(texts) -> list[list[float]], and no
+registry or factory around it.
 
-⸻
+Embeddings run locally on Ollama. The model is 274 MB against 4.9 GB for
+generation, so the memory argument that pushes generation to the cloud does not
+apply, and indexing the corpus costs nothing and needs no API key.
+
+Batching: the provider sends one HTTP request per embed() call, and the command
+splits the backlog into EMBEDDING_BATCH_SIZE batches. Never one request per
+chunk. The final short batch is handled by the slicing.
+
+Validation before storage: every returned vector must be exactly
+Settings.embedding_dimensions wide, which is derived from EMBEDDING_MODEL rather
+than hard-coded. A provider returning a different width raises EmbeddingError
+and nothing is written -- a wrong-width vector would corrupt retrieval silently
+rather than failing.
+
+Idempotence: only chunks where embedding IS NULL are read. Rerunning the
+command does no work; a later ingest that adds chunks embeds only those.
+
+Failure safety: each batch is committed on its own transaction after its
+vectors validate. A failure keeps the batches that succeeded, leaves the rest
+NULL, prints the reason and exits non-zero. The command never reports success
+after a failed batch.
+
+Errors reuse the existing typed hierarchy -- EmbeddingError, code
+embedding_failed -- rather than introducing a second error system. Messages are
+actionable (Ollama not running, model not pulled, timeout, wrong dimension) and
+carry no credentials.
+
 
 11. Vector Storage
+
+Implemented. chunks.embedding is vector(768) with an HNSW index over
+vector_cosine_ops, created by Alembic revision 0001. Vectors are written by
+python -m app.ingestion.embed and are not yet read -- similarity search is the
+retrieval phase.
+
 
 PostgreSQL with pgvector will be used for semantic retrieval.
 
@@ -410,6 +456,22 @@ This is important because the assignment requires answers to cite or clearly ide
 
 13. Incremental Refresh
 
+Implemented. content_hash on documents is the sha256 of the raw transcript
+file, and it decides the work:
+
+    new file        -> create document, create chunks
+    hash unchanged  -> skip, no re-chunking
+    hash changed    -> update document, replace its chunks
+    file removed    -> delete document, chunks cascade
+
+Chunks are replaced rather than updated because chunk boundaries move when the
+text changes, so old chunk indexes cannot be reused.
+
+Pruning is skipped when --limit is in effect: a limited run only sees the first
+N transcripts, so everything past the limit would otherwise look as though it
+had been removed from the repository.
+
+
 The knowledge base should support refreshing the transcript repository without reprocessing unchanged content.
 
 A content hash will be stored for each source document.
@@ -444,60 +506,66 @@ Benefits
 
 14. Runtime Retrieval Flow
 
-The runtime system does not access GitHub.
+Implemented. backend/app/retrieval/retriever.py.
 
-For a user question:
+    query
+      |
+      v
+    query embedding            (Ollama nomic-embed-text, one call)
+      |
+      v
+    pgvector cosine search     (ORDER BY embedding <=> query LIMIT k, HNSW)
+      |
+      v
+    RETRIEVAL_MAX_DISTANCE     (drop chunks that are not close enough)
+      |
+      v
+    RETRIEVAL_MIN_CHUNKS       (too few survivors -> sufficient = False)
+      |
+      v
+    top-k chunks + provenance
 
-User Question
-      │
-      ▼
-FastAPI
-      │
-      ▼
-Load Session Context
-      │
-      ▼
-Agent
-      │
-      ▼
-Query Embedding
-      │
-      ▼
-pgvector Similarity Search
-      │
-      ▼
-Top-K Relevant Chunks
-      │
-      ▼
-Grounded Context
-      │
-      ▼
-LLM
-      │
-      ▼
-Answer + Sources
+Document embeddings are generated offline by python -m app.ingestion.embed.
+Only the query is embedded at request time, so answering a question costs one
+small embedding call and never re-embeds the corpus.
 
-Only the user query needs a new embedding at runtime. The transcript embeddings are precomputed during ingestion.
+The database does the search. No embeddings are loaded into Python and no
+cosine similarity is computed there. EXPLAIN confirms the plan:
 
-⸻
+    Limit
+      ->  Index Scan using ix_chunks_embedding_hnsw on chunks
+            Order By: (embedding <=> '[...]'::vector)
+
+The distance threshold is applied in SQL as a filter over that ordered index
+scan -- also confirmed by EXPLAIN to keep using the index. It is safe there
+because rows arrive in distance order, so nothing beyond the threshold could
+have matched.
 
 15. Retrieval Strategy
 
-The initial retrieval implementation will use semantic similarity against stored chunk embeddings.
+1. Receive the user question.
+2. Embed it with the same model the chunks were embedded with.
+3. Search chunks.embedding by cosine distance in PostgreSQL.
+4. Take the RETRIEVAL_TOP_K nearest.
+5. Drop anything farther than RETRIEVAL_MAX_DISTANCE.
+6. If fewer than RETRIEVAL_MIN_CHUNKS survive, report insufficient evidence.
+7. Return the chunks with provenance for the agent layer to cite.
 
-The retrieval process:
+Result shape (RetrievedChunk): chunk_id, document_id, content, chunk_index,
+distance, title, guest, source_url, source_path. Episode-level provenance comes
+from the joined document row, so it cannot drift between chunks of the same
+transcript.
 
-1. Receive user question.
-2. Generate query embedding.
-3. Search pgvector.
-4. Retrieve the highest-ranked chunks.
-5. Apply optional relevance filtering/reranking.
-6. Construct a compact context.
-7. Pass the context and source metadata to the agent/LLM.
+Reranking is deliberately absent. Distance ordering plus a relevance threshold
+is the whole strategy for now; a reranker is a later decision to be justified by
+measurement, not assumed.
 
-The exact Top-K value will be tuned using retrieval evaluation rather than treated as a fixed requirement.
+Evaluation: evals/retrieval.json holds 23 hand-curated cases -- 20 questions
+with a known expected episode and 3 off-corpus questions that must return
+insufficient evidence. It is the foundation for PRD section 3's retrieval
+relevance target. The metric has not been measured; no scoring harness exists
+yet.
 
-⸻
 
 16. Grounding Strategy
 
@@ -567,79 +635,146 @@ Authentication is intentionally out of MVP scope because the assignment does not
 
 18. Database Schema
 
-Conceptual schema:
+Implemented. Alembic revision 0001 creates the whole schema; SQLAlchemy models
+live in backend/app/db/models.py.
 
-┌──────────────────┐
-│      users       │
-├──────────────────┤
-│ id               │
-│ metadata         │
-│ created_at       │
-└────────┬─────────┘
-         │
-         │ 1:N
-         ▼
-┌──────────────────┐
-│     sessions     │
-├──────────────────┤
-│ id               │
-│ user_id          │
-│ created_at       │
-│ updated_at       │
-└────────┬─────────┘
-         │
-         │ 1:N
-         ▼
-┌──────────────────┐
-│     messages     │
-├──────────────────┤
-│ id               │
-│ session_id       │
-│ role             │
-│ content          │
-│ created_at       │
-└────────┬─────────┘
-         │
-         │ 1:N
-         ▼
-┌──────────────────┐
-│    artifacts     │
-├──────────────────┤
-│ id               │
-│ session_id       │
-│ message_id       │
-│ type             │
-│ content          │
-│ created_at       │
-└──────────────────┘
-┌──────────────────┐
-│    documents     │
-├──────────────────┤
-│ id               │
-│ guest            │
-│ title            │
-│ source_url       │
-│ publish_date     │
-│ content_hash     │
-│ created_at       │
-│ updated_at       │
-└────────┬─────────┘
-         │
-         │ 1:N
-         ▼
-┌──────────────────┐
-│      chunks      │
-├──────────────────┤
-│ id               │
-│ document_id      │
-│ chunk_index      │
-│ content          │
-│ embedding        │
-│ metadata         │
-│ created_at       │
-└──────────────────┘
+Two groups of data, deliberately unrelated to each other. A conversation does
+not own transcript rows, and re-ingesting the corpus does not touch anybody's
+conversation.
+
+APPLICATION DATA
+
+┌──────────────────────┐
+│        users         │
+├──────────────────────┤
+│ id            uuid PK│
+│ metadata      jsonb  │
+│ created_at    tstz   │
+│ updated_at    tstz   │
+└──────────┬───────────┘
+           │ 1:N  ON DELETE CASCADE
+           ▼
+┌──────────────────────┐
+│       sessions       │
+├──────────────────────┤
+│ id            uuid PK│
+│ user_id       uuid FK│
+│ created_at    tstz   │
+│ updated_at    tstz   │
+└──────────┬───────────┘
+           │ 1:N  ON DELETE CASCADE
+           ├──────────────────────────────┐
+           ▼                              ▼
+┌──────────────────────┐      ┌──────────────────────┐
+│      messages        │      │      artifacts       │
+├──────────────────────┤      ├──────────────────────┤
+│ id            uuid PK│      │ id            uuid PK│
+│ session_id    uuid FK│      │ session_id    uuid FK│
+│ role          check  │      │ message_id    uuid FK│ ← nullable, SET NULL
+│ content       text   │◄─────┤ type          check  │
+│ created_at    tstz   │      │ title         varchar│
+└──────────────────────┘      │ content       text   │
+                              │ created_at    tstz   │
+                              │ updated_at    tstz   │
+                              └──────────────────────┘
+
+KNOWLEDGE BASE
+
+┌──────────────────────┐
+│      documents       │
+├──────────────────────┤
+│ id            uuid PK│
+│ source_path   UNIQUE │  ← stable identity across re-ingests
+│ source_url    varchar│
+│ title         varchar│  ┐
+│ guest         varchar│  ├ provenance shown under an answer
+│ publish_date  date   │  ┘
+│ content_hash  indexed│  ← drives incremental refresh
+│ last_ingested_at tstz│
+│ created_at    tstz   │
+│ updated_at    tstz   │
+└──────────┬───────────┘
+           │ 1:N  ON DELETE CASCADE
+           ▼
+┌──────────────────────────────┐
+│            chunks            │
+├──────────────────────────────┤
+│ id                    uuid PK│
+│ document_id           uuid FK│
+│ chunk_index           int    │  ┐ UNIQUE together
+│ content               text   │  ┘
+│ content_hash          indexed│
+│ embedding      vector(768)   │  ← HNSW, vector_cosine_ops
+│ metadata              jsonb  │
+│ created_at            tstz   │
+│ updated_at            tstz   │
+└──────────────────────────────┘
+
+Constraints and the reasoning behind them:
+
+* Primary keys are UUIDs generated by the application. An anonymous user's id
+  is minted by the client and kept in its own browser, so an id must be
+  generatable without a database round-trip.
+* documents.source_path is UNIQUE and is the document's identity.
+  content_hash is indexed but NOT unique: two episodes with identical text
+  would be surprising, not a constraint violation, and failing an ingest over
+  it would be wrong.
+* (document_id, chunk_index) is UNIQUE. A chunk's position in its transcript is
+  part of its identity; two chunks claiming position 4 of one episode would
+  make provenance ambiguous.
+* messages.role and artifacts.type are constrained by CHECK rather than a
+  native ENUM, so adding a value stays an ordinary migration instead of an
+  ALTER TYPE. The allowed sets are defined once, in app/constants.py.
+* messages.created_at defaults to clock_timestamp(), not now(). now() returns
+  the transaction start time, so a user turn and the assistant reply written in
+  one request would share a timestamp and their order would be undefined.
+  Reads order by (created_at, id) so the ordering is total.
+* artifacts.message_id is ON DELETE SET NULL, not CASCADE. Deleting a message
+  should not destroy a document the user may still have open beside the chat.
+* Every timestamp is TIMESTAMP WITH TIME ZONE.
+
+The embedding column's width comes from Settings.embedding_dimensions, in the
+model and in the migration alike — never a literal. A database built from the
+migration therefore always matches the configured EMBEDDING_MODEL. Changing
+EMBEDDING_MODEL against an existing database needs its own migration plus a
+re-ingest, because the stored vectors are the wrong width.
+
+Vector index: HNSW with vector_cosine_ops. IVFFlat derives its lists from the
+rows present when the index is built, and the table is empty at migration time,
+so IVFFlat would build a useless index. Cosine matches
+RETRIEVAL_MAX_DISTANCE, which is expressed as a cosine distance.
+
+Migrations
+
+Alembic is the source of truth for the schema. create_all() is never called —
+not by the application, not by the tests — so the schema a developer has is the
+schema the migrations produce. The DSN is not stored in alembic.ini;
+alembic/env.py reads it from application settings, so one place knows it and no
+credential is committed.
+
+tests/test_migrations.py compares the migrated database against the models with
+alembic.autogenerate.compare_metadata and fails on any difference. Without that
+test, editing a model without writing its migration would pass every other test
+in the suite — because those tests run on a schema built by the same missing
+migration — and only fail on deployment.
+
+Repository layer
+
+Database access is confined to backend/app/db/repositories/. No route handler
+builds a query, so how data is stored stays changeable without touching the API
+layer.
+
+Repositories do not own transactions. app.db.session.get_session commits on a
+successful request and rolls back on failure, so a handler may call several
+repositories and get one atomic unit of work. Repositories only flush, and only
+when they need the database to assign something before returning.
+
+DocumentRepository.upsert returns (document, changed). That boolean is the
+signal that makes refresh incremental: unchanged means skip, changed means
+re-chunk and re-embed.
 
 ⸻
+
 
 19. API Endpoints
 
@@ -1063,6 +1198,26 @@ not left to review. frontend/scripts/check-boundary.mjs runs as part of both
 The check has no dependencies and reports file, line and reason.
 
 31. Testing Strategy
+
+Database tests run against a real PostgreSQL with pgvector and are never
+skipped. The value of the schema is in its constraints, its cascades and its
+vector column, none of which exist in a stand-in — and a skipped constraint
+test is indistinguishable from a passing one in CI output. An unreachable
+database therefore fails the run rather than being quietly stepped over.
+
+The suite resolves its database from TEST_DATABASE_URL if set (point it at a
+Neon test branch to run against the same engine production uses), otherwise a
+local lenny_growth_assistant_test. DATABASE_URL is overwritten in the test
+environment rather than defaulted, so the suite cannot reach the application
+database in backend/.env — the fixtures create and drop schema.
+
+Schema is built once per session by running Alembic (downgrade base, then
+upgrade head, which exercises the downgrade path on every run). Each test then
+runs inside a transaction that is rolled back, so tests are isolated without
+re-creating the schema between them.
+
+⸻
+
 
 Tests will be organized around critical system boundaries.
 

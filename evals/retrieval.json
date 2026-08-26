@@ -1,0 +1,202 @@
+{
+  "description": "Manually curated retrieval cases for Lenny's Podcast corpus. Expected sources are episode directory names under episodes/ in ChatPRD/lennys-podcast-transcripts.",
+  "metric": "retrieval relevance: share of cases where an expected source appears in the top-k retrieved chunks",
+  "target": 0.8,
+  "measured": {
+    "date": "2026-08-27",
+    "corpus": "303 documents, 9842 chunks, all embedded with nomic-embed-text",
+    "settings": {
+      "top_k": 8,
+      "max_distance": 0.45,
+      "min_chunks": 2
+    },
+    "on_corpus_expected_episode_in_top_k": "11/20",
+    "off_corpus_refused": "3/3",
+    "caveat": "The on-corpus figure is a STRICT proxy, not the PRD relevance metric. It asks whether one specific pre-chosen episode appears in the top 8; several 'misses' returned defensibly relevant chunks from a different episode. Judging actual chunk relevance needs a human pass, which has not been done."
+  },
+  "cases": [
+    {
+      "question": "How should a startup think about finding product-market fit?",
+      "expected_sources": [
+        "todd-jackson"
+      ],
+      "topic": "product-market fit",
+      "notes": "Episode title is literally 'A framework for finding product-market fit'."
+    },
+    {
+      "question": "How do I position my product against competitors?",
+      "expected_sources": [
+        "april-dunford-20",
+        "april-dunford"
+      ],
+      "topic": "positioning",
+      "notes": "April Dunford has two episodes; either is a correct hit."
+    },
+    {
+      "question": "How should I price a new product?",
+      "expected_sources": [
+        "madhavan-ramanujam-20",
+        "madhavan-ramanujam"
+      ],
+      "topic": "pricing",
+      "notes": "Two pricing episodes from the same guest."
+    },
+    {
+      "question": "What makes a good product roadmap?",
+      "expected_sources": [
+        "janna-bastow"
+      ],
+      "topic": "roadmapping",
+      "notes": null
+    },
+    {
+      "question": "How do I improve new user onboarding?",
+      "expected_sources": [
+        "lauryn-isford",
+        "gaurav-misra"
+      ],
+      "topic": "onboarding",
+      "notes": "The 'Mastering onboarding' episode appears under two directories."
+    },
+    {
+      "question": "How do I build and structure a growth team?",
+      "expected_sources": [
+        "adam-fishman"
+      ],
+      "topic": "growth teams",
+      "notes": null
+    },
+    {
+      "question": "How does Duolingo use streaks to drive retention?",
+      "expected_sources": [
+        "jackson-shuttleworth"
+      ],
+      "topic": "retention",
+      "notes": "Specific enough that a miss indicates a real retrieval problem."
+    },
+    {
+      "question": "What is product-led growth and how do you make it work?",
+      "expected_sources": [
+        "ben-williams"
+      ],
+      "topic": "product-led growth",
+      "notes": "Snyk PLG episode."
+    },
+    {
+      "question": "How do I develop a product strategy?",
+      "expected_sources": [
+        "chandra-janakiraman",
+        "shreyas-doshi"
+      ],
+      "topic": "product strategy",
+      "notes": "Several episodes cover strategy; these are the most direct."
+    },
+    {
+      "question": "How do I build a growth model for a marketplace?",
+      "expected_sources": [
+        "dan-hockenmaier"
+      ],
+      "topic": "marketplace growth",
+      "notes": null
+    },
+    {
+      "question": "How does Stripe think about product craft and quality?",
+      "expected_sources": [
+        "jeff-weinstein"
+      ],
+      "topic": "product craft",
+      "notes": null
+    },
+    {
+      "question": "Why do founders fail?",
+      "expected_sources": [
+        "ben-horowitz"
+      ],
+      "topic": "founders",
+      "notes": null
+    },
+    {
+      "question": "How do I take control of my career as a product manager?",
+      "expected_sources": [
+        "ethan-evans-20",
+        "ethan-evans"
+      ],
+      "topic": "career growth",
+      "notes": null
+    },
+    {
+      "question": "How should I reorganise a team without losing momentum?",
+      "expected_sources": [
+        "heidi-helfand"
+      ],
+      "topic": "reteaming",
+      "notes": "'The art and wisdom of changing teams'."
+    },
+    {
+      "question": "How do I find hidden growth opportunities in an existing product?",
+      "expected_sources": [
+        "albert-cheng"
+      ],
+      "topic": "growth opportunities",
+      "notes": null
+    },
+    {
+      "question": "How did Calendly grow so quickly?",
+      "expected_sources": [
+        "annie-pearl"
+      ],
+      "topic": "company growth story",
+      "notes": null
+    },
+    {
+      "question": "How was Replit built?",
+      "expected_sources": [
+        "amjad-masad"
+      ],
+      "topic": "building a product",
+      "notes": null
+    },
+    {
+      "question": "How do you build a resilient team that handles setbacks?",
+      "expected_sources": [
+        "hilary-gridley"
+      ],
+      "topic": "team building",
+      "notes": "'How to build a team that can take a punch'."
+    },
+    {
+      "question": "When should a company hire its first product manager?",
+      "expected_sources": [
+        "gokul-rajaram"
+      ],
+      "topic": "hiring PMs",
+      "notes": null
+    },
+    {
+      "question": "How does Airbnb approach product management?",
+      "expected_sources": [
+        "brian-chesky"
+      ],
+      "topic": "product management",
+      "notes": "Chesky's episode is well known for its take on PM at Airbnb."
+    },
+    {
+      "question": "What is the best recipe for sourdough bread?",
+      "expected_sources": [],
+      "topic": "off-corpus",
+      "notes": "Must return insufficient evidence, not the nearest vector."
+    },
+    {
+      "question": "How do I treat a sprained ankle?",
+      "expected_sources": [],
+      "topic": "off-corpus",
+      "notes": "Must return insufficient evidence."
+    },
+    {
+      "question": "Who won the 2010 FIFA World Cup?",
+      "expected_sources": [],
+      "topic": "off-corpus",
+      "notes": "Must return insufficient evidence."
+    }
+  ]
+}

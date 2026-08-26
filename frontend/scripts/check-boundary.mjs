@@ -1,17 +1,11 @@
 #!/usr/bin/env node
 /**
- * Enforces the frontend's one architectural rule:
+ * Enforces one rule: the frontend talks to the FastAPI backend and nothing
+ * else. No database, no model provider, no third-party service, no CDN.
  *
- *   The frontend talks to the FastAPI backend and to nothing else.
- *
- * No database, no model provider, no third-party service, no CDN. The backend
- * owns every credential and every downstream call. That rule is easy to state
- * and easy to break by accident -- one `fetch` to a vendor endpoint, one
- * `VITE_API_KEY` that ships the secret to every browser -- so it is checked
- * here rather than trusted.
- *
- * Zero dependencies, so it runs anywhere `node` does. Wired into `npm run
- * lint` and `npm run build`, meaning a violation cannot reach a bundle.
+ * Easy to break by accident -- one `fetch` to a vendor endpoint, one
+ * `VITE_API_KEY` that ships a secret to every browser -- so it is checked
+ * rather than trusted. Runs in `npm run lint` and `npm run build`.
  */
 
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -26,10 +20,7 @@ const API_CLIENT = 'src/api/client.ts';
 /** The only module allowed to hold a URL literal or read configuration. */
 const CONSTANTS = 'src/constants.ts';
 
-/**
- * Anything that can open a connection the API client does not control.
- * `new Worker` and `importScripts` are included because a worker can fetch.
- */
+// `new Worker`/`importScripts` are included because a worker can fetch.
 const NETWORK_PRIMITIVES = [
   { pattern: /\bfetch\s*\(/, name: 'fetch()' },
   { pattern: /\bXMLHttpRequest\b/, name: 'XMLHttpRequest' },
@@ -40,11 +31,8 @@ const NETWORK_PRIMITIVES = [
   { pattern: /\bimportScripts\b/, name: 'importScripts' },
 ];
 
-/**
- * Packages that only make sense if the frontend is talking to a service
- * directly. Presence in package.json is the violation -- an unused dependency
- * is still an invitation.
- */
+// Presence in package.json is the violation: an unused dependency is still
+// an invitation.
 const FORBIDDEN_DEPENDENCIES = [
   // Databases
   'pg', 'pg-promise', 'postgres', 'mysql', 'mysql2', 'mongodb', 'mongoose',
@@ -62,10 +50,8 @@ const FORBIDDEN_DEPENDENCIES = [
   'aws-sdk',
 ];
 
-/**
- * HTTP clients. Not a boundary violation on their own, but they bypass the
- * single client that owns timeouts, the error envelope and typed failures.
- */
+// Not a boundary violation on their own, but they bypass the single client
+// that owns timeouts and the error envelope.
 const FORBIDDEN_HTTP_CLIENTS = ['axios', 'ky', 'got', 'superagent', 'request'];
 
 /** Env var name fragments that would put a secret in a public bundle. */
@@ -79,14 +65,12 @@ function fail(file, line, message) {
 }
 
 /**
- * Blank out comments so a URL in documentation does not trip the checks,
- * while leaving string literals intact -- a URL inside a string is exactly
- * what we are looking for.
+ * Blank out comments, leaving string literals intact -- a URL inside a string
+ * is what we are looking for.
  *
- * This is a character scanner rather than a regex because a regex cannot tell
- * the `//` in `https://` from the start of a line comment. Getting that wrong
- * silently swallows the rest of the line, which would hide real violations.
- * Comment characters become spaces so reported line numbers stay accurate.
+ * A character scanner, not a regex: a regex cannot tell the `//` in `https://`
+ * from a line comment, and getting that wrong silently swallows the rest of
+ * the line. Comments become spaces so line numbers stay accurate.
  */
 function stripComments(source) {
   const out = source.split('');

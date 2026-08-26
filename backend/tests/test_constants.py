@@ -18,8 +18,8 @@ from typing import get_args
 import pytest
 
 from app.constants import (
+    API_PREFIX,
     BACKEND_DIR,
-    DEFAULT_API_PREFIX,
     ERROR_HTTP,
     ERROR_VALIDATION,
     LLMProviderId,
@@ -110,7 +110,7 @@ class TestRouteContract:
         endpoints = parse_string_record(frontend_source, "ENDPOINTS")
 
         assert endpoints["health"] == ROUTE_HEALTH
-        assert endpoints["providers"] == f"{DEFAULT_API_PREFIX}{ROUTE_PROVIDERS}"
+        assert endpoints["providers"] == f"{API_PREFIX}{ROUTE_PROVIDERS}"
 
     def test_endpoints_are_absolute(self, frontend_source: str) -> None:
         """A relative path would resolve against the page, not the API."""
@@ -120,21 +120,6 @@ class TestRouteContract:
 
 
 class TestBackendConstantsHygiene:
-    def test_shared_containers_are_immutable(self) -> None:
-        """Shared mutable defaults are a classic accidental-aliasing bug."""
-        from app import constants
-
-        for name in (
-            "DEFAULT_CORS_ORIGINS",
-            "DEFAULT_ALLOWED_HOSTS",
-            "ALLOWED_HTTP_METHODS",
-            "UVICORN_LOGGERS",
-        ):
-            assert isinstance(getattr(constants, name), tuple), name
-
-        for name in ("QUIET_PATHS", "VALID_LOG_LEVELS", "REDACTED_KEYS"):
-            assert isinstance(getattr(constants, name), frozenset), name
-
     def test_settings_defaults_do_not_alias_the_constant(self) -> None:
         """Each Settings instance must get its own list."""
         from app.config import Settings

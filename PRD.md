@@ -4,6 +4,12 @@ The Lenny Growth Assistant
 
 Version: 1.0
 Status: Take-Home Assessment
+Implementation status: Foundation, model providers, database schema +
+persistence, transcript ingestion, embedding generation and vector retrieval
+are implemented. Answer generation, the agent, chat and artifact generation are
+not yet built. A retrieval evaluation set exists in evals/; the relevance
+metric in section 3 has not been measured yet. See README.md for the current
+breakdown.
 Target: Forward Deployed Engineer
 Data Source: ChatPRD/lennys-podcast-transcripts
 

@@ -120,6 +120,23 @@ class TestValidation:
             make(retrieval_top_k=0)
 
 
+class TestProbeTimeouts:
+    """A probe that always times out is worse than no probe."""
+
+    def test_database_probe_allows_for_a_remote_database(self) -> None:
+        """Establishing a TLS connection to a managed Postgres costs seconds.
+
+        A ceiling below that makes /health report `degraded` permanently and
+        cancels the connection before it can enter the pool, so no later probe
+        ever succeeds either.
+        """
+        assert make().database_probe_timeout_seconds >= 10.0
+
+    def test_probe_timeouts_must_be_positive(self) -> None:
+        with pytest.raises(ValidationError):
+            make(database_probe_timeout_seconds=0)
+
+
 class TestSecrets:
     def test_api_keys_are_not_rendered_in_repr(self) -> None:
         """An accidental log of the settings object must not leak the key."""
@@ -131,11 +148,26 @@ class TestSecrets:
         assert settings.anthropic_api_key.get_secret_value() == "sk-secret-value"
 
 
-class TestDatabaseUrls:
-    def test_sync_url_uses_blocking_driver(self) -> None:
-        settings = make(database_url="postgresql+asyncpg://localhost:5432/db")
+class TestDatabaseUrl:
+    """A bare postgresql:// DSN would make SQLAlchemy reach for psycopg2."""
 
-        assert settings.sync_database_url == "postgresql+psycopg://localhost:5432/db"
+    def test_bare_dsn_is_pinned_to_psycopg(self) -> None:
+        assert (
+            make(database_url="postgresql://host/db").sqlalchemy_url
+            == "postgresql+psycopg://host/db"
+        )
+
+    def test_asyncpg_dsn_is_pinned_to_psycopg(self) -> None:
+        assert (
+            make(database_url="postgresql+asyncpg://host/db").sqlalchemy_url
+            == "postgresql+psycopg://host/db"
+        )
+
+    def test_an_explicit_psycopg_dsn_is_left_alone(self) -> None:
+        assert (
+            make(database_url="postgresql+psycopg://host/db").sqlalchemy_url
+            == "postgresql+psycopg://host/db"
+        )
 
 
 class TestDefaults:

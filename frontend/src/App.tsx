@@ -11,7 +11,7 @@ import { useEffect, useState } from 'react';
 
 import { ApiError, fetchHealth, type HealthResponse } from './api/client';
 import { ModelSelector } from './components/ModelSelector';
-import { COPY, type ProviderId } from './constants';
+import type { ProviderId } from './constants';
 import { useProviders } from './hooks/useProviders';
 
 type ConnectionState =
@@ -34,7 +34,9 @@ export default function App() {
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
         const message =
-          error instanceof Error ? error.message : COPY.unreachable;
+          error instanceof Error
+            ? error.message
+            : 'Could not reach the assistant.';
         // A 503 from /health means the backend is up but a dependency is not.
         setConnection({
           status: error instanceof ApiError ? 'degraded' : 'unreachable',
@@ -55,16 +57,19 @@ export default function App() {
   return (
     <main className="shell">
       <header className="shell-header">
-        <h1>{COPY.appTitle}</h1>
-        <p className="tagline">{COPY.tagline}</p>
+        <h1>Lenny Growth Assistant</h1>
+        <p className="tagline">
+          Ask questions about product and growth using knowledge from
+          Lenny&apos;s Podcast.
+        </p>
       </header>
 
       <section aria-live="polite" className="status">
-        {connection.status === 'checking' && <p>{COPY.connecting}</p>}
+        {connection.status === 'checking' && <p>Connecting to the assistant…</p>}
 
         {connection.status === 'ready' && (
           <p className="status-ok">
-            <span aria-hidden="true">●</span> {COPY.backendConnected} (
+            <span aria-hidden="true">●</span> Backend connected (
             {connection.health.environment} · v{connection.health.version})
           </p>
         )}
@@ -84,7 +89,7 @@ export default function App() {
 
       <section className="panel">
         {providers.status === 'loading' && (
-          <p className="muted">{COPY.loadingModels}</p>
+          <p className="muted">Loading available models…</p>
         )}
 
         {providers.status === 'error' && (
@@ -103,7 +108,8 @@ export default function App() {
 
             {noModelAvailable && (
               <p className="status-error" role="alert">
-                {COPY.noModelAvailable}
+                No model is available right now. Start Ollama locally, or
+                configure a cloud provider, to ask a question.
               </p>
             )}
           </>

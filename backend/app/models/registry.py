@@ -1,13 +1,8 @@
-"""Provider registry: availability, defaults and server-side enforcement.
+"""Provider registry: availability, defaults, and server-side enforcement.
 
-The registry is the single place that answers "which model may this request
-use?". The frontend disables an unselectable option, but that is a courtesy,
-not a control: :meth:`ProviderRegistry.require` re-checks on every request so
-a hand-crafted call cannot select a provider the environment has disabled.
-
-Probe results are cached for ``PROVIDER_STATUS_TTL_SECONDS``. Without it, a
-page load plus a message send would each pay a network round-trip to Ollama,
-and a dead daemon would cost the probe timeout every time.
+The frontend disables an unselectable option, but that is a courtesy, not a
+control -- `require` re-checks on every request, so a hand-crafted call cannot
+select a provider the environment has disabled.
 """
 
 from __future__ import annotations
@@ -26,8 +21,7 @@ from app.models.ollama import OllamaProvider
 
 logger = get_logger(__name__)
 
-# Declaration order is display order in the UI: local first, matching
-# design.md section 10, where the local demo is the primary path.
+# Declaration order is display order in the UI: local first.
 PROVIDER_TYPES: tuple[type[ModelProvider], ...] = (OllamaProvider, CloudModelProvider)
 
 
@@ -36,7 +30,7 @@ class ProviderRegistry:
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self._providers: dict[LLMProviderId, ModelProvider] = {
+        self._providers: dict[str, ModelProvider] = {
             provider_type.id: provider_type(settings)
             for provider_type in PROVIDER_TYPES
         }
@@ -45,50 +39,38 @@ class ProviderRegistry:
         self._lock = asyncio.Lock()
 
     def get(self, provider_id: str) -> ModelProvider | None:
-        """Return a provider by id, or ``None`` if the id is unknown."""
-        return self._providers.get(provider_id)  # type: ignore[arg-type]
+        return self._providers.get(provider_id)
 
-    async def statuses(self, *, refresh: bool = False) -> list[ProviderStatus]:
-        """Return the status of every known provider, newest-first cached.
+    async def statuses(self) -> list[ProviderStatus]:
+        """Status of every known provider, cached briefly.
 
-        Every provider is always returned, including ones that are disabled,
-        so the UI can render them greyed out with an explanation rather than
-        making an option disappear between environments.
+        Every provider is always returned, including disabled ones, so the UI
+        can grey an option out instead of making it disappear.
+
+        Cached because a page load plus a message send would otherwise each
+        probe Ollama, and a dead daemon would cost the timeout every time.
         """
-        if not refresh and self._is_cache_fresh():
-            return self._cache or []
-
         async with self._lock:
-            # Another coroutine may have refreshed while we waited.
-            if not refresh and self._is_cache_fresh():
-                return self._cache or []
-
-            statuses = await asyncio.gather(
-                *(provider.status() for provider in self._providers.values())
-            )
-            self._cache = list(statuses)
-            self._cached_at = time.monotonic()
-
-        logger.info(
-            "provider_status_refreshed",
-            available=[s.id for s in self._cache if s.available],
-            unavailable=[s.id for s in self._cache if not s.available],
-        )
-        return self._cache
-
-    def _is_cache_fresh(self) -> bool:
-        if self._cache is None:
-            return False
-        age = time.monotonic() - self._cached_at
-        return age < self.settings.provider_status_ttl_seconds
+            age = time.monotonic() - self._cached_at
+            if self._cache is None or age >= self.settings.provider_status_ttl_seconds:
+                self._cache = list(
+                    await asyncio.gather(
+                        *(provider.status() for provider in self._providers.values())
+                    )
+                )
+                self._cached_at = time.monotonic()
+                logger.info(
+                    "provider_status_refreshed",
+                    available=[s.id for s in self._cache if s.available],
+                    unavailable=[s.id for s in self._cache if not s.available],
+                )
+            return self._cache
 
     async def default_provider_id(self) -> LLMProviderId | None:
-        """Resolve the provider a new conversation should use.
+        """The provider a new conversation should use.
 
-        Prefers the configured ``LLM_PROVIDER`` and falls back to the first
-        available provider, so a deployment that ships the local default into
-        production still opens on a working model instead of a dead option.
-        Returns ``None`` when nothing is available at all.
+        Falls back to the first available one, so shipping LLM_PROVIDER=ollama
+        to production still opens on a working model. None if nothing works.
         """
         statuses = await self.statuses()
         by_id = {status.id: status for status in statuses}
@@ -110,13 +92,7 @@ class ProviderRegistry:
         return None
 
     async def require(self, provider_id: str | None) -> ModelProvider:
-        """Return a usable provider or raise.
-
-        This is the enforcement point for generation requests. ``None`` means
-        "use the default". An unknown, policy-disabled or unreachable provider
-        raises :class:`ProviderUnavailableError` carrying the user-facing
-        reason, so the client sees why rather than a bare 503.
-        """
+        """Return a usable provider or raise. None means "use the default"."""
         if provider_id is None:
             resolved = await self.default_provider_id()
             if resolved is None:
@@ -128,18 +104,16 @@ class ProviderRegistry:
         provider = self.get(provider_id)
         if provider is None:
             raise ProviderUnavailableError(
-                "The requested model is not recognised.",
-                requested=provider_id,
+                "The requested model is not recognised.", requested=provider_id
             )
 
         status = next(
-            (s for s in await self.statuses() if s.id == provider_id),
-            None,
+            (s for s in await self.statuses() if s.id == provider_id), None
         )
         if status is None or not status.available:
-            reason = status.reason if status else None
             raise ProviderUnavailableError(
-                reason or "The selected model is currently unavailable.",
+                (status.reason if status else None)
+                or "The selected model is currently unavailable.",
                 requested=provider_id,
             )
 
@@ -148,5 +122,4 @@ class ProviderRegistry:
 
 @lru_cache(maxsize=1)
 def get_provider_registry() -> ProviderRegistry:
-    """Return the process-wide registry."""
     return ProviderRegistry(get_settings())
