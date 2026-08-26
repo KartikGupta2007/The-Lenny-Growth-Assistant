@@ -120,6 +120,16 @@ class Message(Base):
     )
     role: Mapped[MessageRole] = mapped_column(String(16), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    # Source provenance for an assistant turn, so reopening a conversation
+    # restores its citations. Holds metadata only -- never the retrieved
+    # passages.
+    #
+    # none_as_null because SQLAlchemy otherwise stores Python None as JSON
+    # 'null', leaving two different representations of "no provenance" in one
+    # column and breaking `WHERE metadata IS NULL`.
+    message_metadata: Mapped[dict[str, Any] | None] = mapped_column(
+        "metadata", JSONB(none_as_null=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

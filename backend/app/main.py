@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from app.api import health, providers
+from app.api import health, providers, sessions
 from app.config import Settings, get_settings
 from app.constants import (
     ERROR_HTTP,
@@ -196,6 +196,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Health sits at the root so probes need no knowledge of the API prefix.
     app.include_router(health.router)
     app.include_router(providers.router, prefix=settings.api_prefix)
+    app.include_router(sessions.router, prefix=settings.api_prefix)
 
     return app
 

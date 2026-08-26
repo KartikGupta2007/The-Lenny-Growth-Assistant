@@ -569,69 +569,122 @@ yet.
 
 16. Grounding Strategy
 
-The LLM should treat retrieved transcript content as its primary evidence.
+Implemented. backend/app/agent/.
 
-The system should:
+    question
+      |
+      v
+    retrieval                  (query embedded at request time)
+      |
+      v
+    evidence check             sufficient == False -> STOP, no model call
+      |
+      v
+    grounded context           numbered evidence, episode + guest, no URLs, no ids
+      |
+      v
+    selected LLM               Ollama llama3.1:8b or Claude
+      |
+      v
+    answer + sources           sources built from retrieval, never from the text
 
-* Prefer retrieved transcript evidence.
-* Avoid unsupported claims.
-* Include source information.
-* State when the knowledge base does not provide sufficient evidence.
+Retrieval happens before generation, always. The model is chosen only after the
+evidence check passes, so an unavailable provider cannot turn an
+insufficient-evidence question into an error.
 
-Example:
+The evidence check is the primary anti-hallucination control. When retrieval
+reports insufficient evidence the model is never invoked and a fixed string is
+returned. A model that is not asked cannot answer unsupported. This also makes
+the behaviour deterministic and cheap -- roughly a second, versus a generation.
 
-Question
-   │
-   ▼
-Retrieved Evidence
-   │
-   ▼
-Grounded Prompt
-   │
-   ▼
-LLM
-   │
-   ▼
-Answer
-   │
-   └── Sources
+What the model receives:
 
-If retrieval produces insufficient evidence, the system should not fabricate an answer.
+* the system prompt (~10 lines: answer from the evidence only, do not invent
+  facts or URLs, cite what you use, say what the evidence does not cover)
+* the retrieved chunks, numbered [1]..[n], each with episode title and guest
+* the user's question
+* at most the last 6 conversation turns
 
-⸻
+What the model never receives: the corpus, the database, any credential, any
+row id, and any source URL. Withholding URLs is deliberate -- a model cannot
+echo a link it never saw, so a fabricated citation has nothing to attach to.
+
+Source attribution is owned by the backend. Answer.sources is built from the
+RetrievalResult, in evidence order, so the [2] in the model's prose maps to a
+source whose title, guest and URL came from PostgreSQL. LLM-generated URLs are
+never trusted, parsed or surfaced.
+
+Conversation history is accepted by the agent (agent.answer_question(...,
+history=[...])) and capped, so a long thread cannot crowd out the evidence.
+Retrieval always runs on the current question alone: a follow-up is searched
+for what it asks rather than for the whole conversation. There is no query
+rewriting.
+
+Provider errors map onto the existing typed hierarchy -- ModelTimeoutError,
+ModelError, ProviderUnavailableError -- so a timeout is distinguishable from
+"pick another model". Messages never include a credential; a rejected Anthropic
+key reports that it was rejected without echoing it.
+
 
 17. Session and Conversation Architecture
 
-Each conversation has an independent session.
+Implemented. backend/app/api/sessions.py and answer_in_conversation in
+backend/app/agent/agent.py.
 
-users
-  │
-  └── sessions
-        │
-        └── messages
-              │
-              └── artifacts
+    POST /api/sessions                  start a conversation
+    GET  /api/sessions                  this user's conversations
+    GET  /api/sessions/{id}             the conversation and its messages
+    POST /api/sessions/{id}/messages    ask a question, get a grounded answer
 
-A session contains:
+No authentication, by design (PRD section 5.2). A client sends its own
+identifier in the X-User-Id header and keeps it in browser storage; requests
+without one share a single anonymous user row. The header identifies, it does
+not authenticate, and it is not a security boundary. Another user's
+conversation is reported as not_found rather than forbidden -- without
+authentication there is no identity to deny.
 
-session_id
-created_at
-updated_at
-user_id / metadata
+Turn flow:
 
-A message contains:
+    load recent history + persist the user message   -> commit
+    retrieve on the current question                 -> close
+    evidence check                                   (insufficient -> no model call)
+    generate                                         (no database connection held)
+    persist the assistant message                    -> commit
 
-message_id
-session_id
-role
-content
-created_at
-metadata
+Transaction strategy: generation takes 15-80 seconds, so each step gets its own
+short-lived session and no transaction spans the model call. A connection
+sitting idle inside a transaction for a minute is a connection the rest of the
+application cannot use.
 
-This allows follow-up questions to use the current conversation context while keeping different chats isolated.
+Failure semantics: if generation fails, the user message stays persisted and no
+assistant message is written. The request returns the existing typed error. A
+gap the user can retry is better than a fabricated assistant success.
 
-⸻
-Authentication is intentionally out of MVP scope because the assignment does not require authenticated users. Anonymous users are assigned a persistent user identifier so that sessions and conversation history can still be stored independently.
+An insufficient-evidence decline IS persisted as an assistant message, because
+it is part of the conversation the user sees and a reload should show it.
+
+History is capped (MAX_HISTORY_MESSAGES = 6) so a long thread cannot crowd out
+the evidence. Retrieval always runs on the current question alone: a follow-up
+is searched for what it asks rather than for the whole conversation. There is no
+query rewriting.
+
+Source provenance is persisted. Revision 0002 adds a nullable metadata JSONB
+column to messages; an assistant turn stores {sources, grounded, provider} so
+reopening a conversation restores its citations. GET /api/sessions/{id} returns
+each message with those fields already populated.
+
+Metadata only: the retrieved passages stay in chunks rather than being copied
+into every message that cited them (~640 bytes per assistant turn). The column
+is nullable, so user turns and rows written before 0002 keep working and read
+back as no sources.
+
+The column uses JSONB(none_as_null=True). Without it SQLAlchemy stores Python
+None as JSON 'null', which would leave two representations of "no provenance"
+in one column and make `WHERE metadata IS NULL` blind to half of them.
+
+The stateless POST /api/chat from the previous phase was removed. Nothing
+consumed it, and one conversation path is easier to reason about than two.
+
 
 18. Database Schema
 

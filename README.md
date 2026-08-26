@@ -10,9 +10,9 @@ Answers cite the episodes they came from, follow-up questions keep session
 context, and the assistant can turn what it finds into a Ship 30 for 30-style
 essay or a rendered Markdown / HTML artifact shown beside the chat.
 
-> **Implementation status — foundation, model providers, database schema +
-> persistence, transcript ingestion, embedding generation, and vector retrieval
-> complete.** Answer generation, the agent and chat are not yet built.
+> **Implementation status — the whole backend conversation path works:
+> ingestion, embeddings, retrieval, grounded generation, and persistent
+> sessions.** The Ship 30 skill, artifacts and the chat UI are not yet built.
 > This README documents only what is actually built and verified. Sections
 > marked *Not yet implemented* are planned but absent. See
 > [Implementation status](#implementation-status) for the full breakdown.
@@ -211,6 +211,136 @@ and getting that wrong silently swallows the rest of the line.
 The current tree passes with exactly **one** `fetch` (in the API client), one
 absolute URL (the backend's default base URL), one env var
 (`VITE_API_BASE_URL`), and two runtime dependencies (`react`, `react-dom`).
+
+### Conversations
+
+No authentication, by design (PRD section 5.2). A client sends its own
+identifier in `X-User-Id` and keeps it in browser storage; requests without one
+share a single anonymous user. **The header identifies, it does not
+authenticate** — it is not a security boundary, and one user's conversation is
+reported as `not_found` to another rather than `forbidden`, because without
+authentication there is no identity to deny.
+
+| | |
+| --- | --- |
+| `POST /api/sessions` | start a conversation → 201 |
+| `GET /api/sessions` | this user's conversations, most recently active first |
+| `GET /api/sessions/{id}` | the conversation and its messages, oldest first |
+| `POST /api/sessions/{id}/messages` | ask a question, get a grounded answer |
+
+```bash
+SID=$(curl -sX POST localhost:8000/api/sessions -H "X-User-Id: $UID" | jq -r .id)
+
+curl -X POST localhost:8000/api/sessions/$SID/messages \
+  -H "X-User-Id: $UID" -H 'Content-Type: application/json' \
+  -d '{"message": "What does Lenny say about product-market fit?", "provider": "anthropic"}'
+```
+
+```jsonc
+{
+  "message": { "id": "…", "role": "assistant", "content": "Based on the evidence…",
+               "created_at": "…" },
+  "sources": [ { "number": 1, "document_id": "…", "chunk_id": "…",
+                 "title": "…", "guest": "Christopher Lochhead",
+                 "source_url": "https://www.youtube.com/watch?v=…",
+                 "chunk_index": 22 } ],
+  "grounded": true,
+  "provider": "anthropic"
+}
+```
+
+`message` is 1–2000 characters after trimming. `provider` is optional. Unknown
+session → `not_found`; unknown provider → `validation_error`; unavailable
+provider → `provider_unavailable`; timeout → `model_timeout`.
+
+There is no stateless `POST /api/chat` any more. Nothing consumed it, and one
+conversation path is easier to reason about than two.
+
+### Grounded answers
+
+```
+question → retrieval → evidence check → grounded context → selected LLM → answer + sources
+```
+
+**Insufficient evidence stops generation.** When retrieval reports
+`sufficient: False`, the model is **never called** and a fixed response is
+stored and returned with `grounded: false` and no sources:
+
+```
+"I don't have enough information in Lenny's Podcast transcripts to answer that confidently."
+```
+
+A model that is not asked cannot invent an answer. This is the application's
+main anti-hallucination control, and it costs a few seconds instead of a
+generation.
+
+**The backend owns the sources.** They are built from the retrieval result, not
+parsed out of the model's text. The evidence block shows the model numbered
+passages with episode and guest only — **no URLs and no database ids** — so the
+model has no URL to echo and nothing to fabricate a citation from. It may write
+`[2]`; the metadata behind `[2]` is the backend's.
+
+**Only the evidence is sent.** The model receives the system prompt, the
+retrieved chunks, the question, and at most the last 6 turns. Never the corpus,
+never the database, never any credential.
+
+The grounding prompt is ~10 lines in
+[`app/agent/prompts.py`](backend/app/agent/prompts.py): answer from the
+evidence only, do not invent facts or URLs, cite what you use, say what the
+evidence does not cover.
+
+### Follow-up questions
+
+Earlier turns are loaded and passed to the model, capped at 6 so a long thread
+cannot crowd out the evidence. **Retrieval always runs on the current question
+alone** — a follow-up is searched for what it asks, not for the whole
+conversation. There is no query rewriting.
+
+### Transactions
+
+Generation takes 15–80 seconds. A database transaction is never held across it:
+
+```
+load history + save the question  → commit
+retrieve                          → close
+generate                          (no database connection held)
+save the answer                   → commit
+```
+
+Each step gets its own short-lived session. If generation fails, the question
+stays persisted and there is no assistant message — a gap the user can retry,
+rather than a fabricated success. There is a test for exactly that.
+
+### Persisted provenance
+
+Assistant messages store the sources they were grounded in, so reopening a
+conversation restores its citations. `GET /api/sessions/{id}` returns each
+message with `sources`, `grounded` and `provider` already populated — the
+frontend renders source chips without reconstructing anything.
+
+```jsonc
+// messages.metadata (JSONB, nullable)
+{
+  "sources": [
+    { "number": 1, "chunk_id": "…", "document_id": "…",
+      "title": "Pricing your AI product… | Madhavan Ramanujam",
+      "guest": "Madhavan Ramanujam",
+      "source_url": "https://www.youtube.com/watch?v=…",
+      "chunk_index": 20 }
+  ],
+  "grounded": true,
+  "provider": "anthropic"
+}
+```
+
+**Metadata only.** The passages stay in `chunks` rather than being copied into
+every message that cited them — stored provenance averages ~640 bytes per
+assistant turn. A declined turn stores `{"sources": [], "grounded": false,
+"provider": null}`.
+
+The column is nullable: user turns and messages written before revision `0002`
+have none, and both come back as `sources: []`, `grounded: null`,
+`provider: null`.
 
 ---
 
@@ -694,6 +824,8 @@ Current state — **127 tests, all passing**:
 | `tests/test_ingestion.py` | Discovery (and what it ignores), frontmatter parsing, metadata gaps, cleaning, chunk order/overlap/determinism, oversized paragraphs, invalid transcripts, content hashing, skip-unchanged, reprocess-changed, removal cleanup, `--limit` behaviour, NULL embeddings |
 | `tests/test_embeddings.py` | Provider batching and dimension validation, unreachable/timeout/missing-model errors, no credentials in errors, NULL-only selection, persistence, idempotence, `--limit` window semantics, per-batch failure safety |
 | `tests/test_retrieval.py` | Query embedded (and only the query), exact cosine distances, ordering, `top_k`, threshold filtering, minimum-chunk rule, insufficient evidence, provenance, HNSW index used, corpus unmodified, provider failure propagation |
+| `tests/test_agent.py` | Retrieval before generation, evidence reaches the model, no ids or URLs sent to it, sources come from retrieval not the model, LLM never called on insufficient evidence, deterministic decline, history passed and capped, Ollama + Claude generation via mock transports, timeout/empty/auth failures |
+| `tests/test_sessions.py` | Session create/list/get, user isolation, unknown session, both turns persisted, message ordering, follow-up history, retrieval uses the current question, decline persisted, failed generation leaves no assistant message and can be retried, validation, no credential in a response |
 
 The frontend has its own gate, run by `npm run lint` and `npm run build`:
 `scripts/check-boundary.mjs` — see [The frontend boundary](#the-frontend-boundary).
@@ -739,8 +871,9 @@ Phases follow the plan in [PRD.md](PRD.md) section 23.
 | 3 | Transcript ingestion: repo sync, parsing, cleaning, chunking, incremental refresh | **Complete** |
 | 3b | Embedding generation: local Ollama, batched, validated, incremental | **Complete** |
 | 4 | Retrieval: query embedding, pgvector similarity search, relevance threshold, provenance | **Complete** |
-| 5 | Agent layer, RAG tool, grounded generation on the existing provider abstraction | Not yet implemented |
-| 6 | Chat API, conversational UI, source display, provider selection | Not yet implemented |
+| 5 | Grounded generation: agent, prompt, `POST /api/chat`, source attribution | **Complete** |
+| 6 | Session + message persistence, session API | **Complete** |
+| 6b | Conversational UI, source display, provider selection in chat | Not yet implemented |
 | 7 | Ship 30 for 30 skill, artifact generation, artifact viewer, HTML sanitisation | Not yet implemented |
 | 8 | Error handling hardening, observability, full test suite | Not yet implemented |
 | 9 | Documentation sync, clean-environment verification, manual UI test plan | Not yet implemented |

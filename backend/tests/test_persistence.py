@@ -253,6 +253,60 @@ class TestMessages:
             )
             assert message.role == role
 
+    async def test_metadata_round_trips_as_jsonb(
+        self, db_session: AsyncSession
+    ) -> None:
+        conversation = await a_session(db_session)
+        repository = MessageRepository(db_session)
+        provenance = {
+            "sources": [{"number": 1, "title": "An episode", "chunk_index": 4}],
+            "grounded": True,
+            "provider": "ollama",
+        }
+
+        message = await repository.create(
+            session_id=conversation.id,
+            role=ROLE_ASSISTANT,
+            content="an answer",
+            metadata=provenance,
+        )
+        db_session.expunge_all()
+        reloaded = (await repository.list_by_session(conversation.id))[0]
+
+        assert reloaded.message_metadata == provenance
+
+    async def test_metadata_is_optional(self, db_session: AsyncSession) -> None:
+        """User turns and pre-existing rows have none."""
+        conversation = await a_session(db_session)
+
+        message = await MessageRepository(db_session).create(
+            session_id=conversation.id, role=ROLE_USER, content="a question"
+        )
+
+        assert message.message_metadata is None
+
+    async def test_absent_metadata_is_sql_null_not_json_null(
+        self, db_session: AsyncSession
+    ) -> None:
+        """One representation of "no provenance", not two.
+
+        SQLAlchemy stores Python None in a JSON column as JSON 'null' unless
+        told otherwise, which would leave `WHERE metadata IS NULL` blind to it
+        and break jsonb_typeof/jsonb_object_keys queries.
+        """
+        conversation = await a_session(db_session)
+        await MessageRepository(db_session).create(
+            session_id=conversation.id, role=ROLE_USER, content="a question"
+        )
+
+        kinds = (
+            await db_session.execute(
+                text("SELECT jsonb_typeof(metadata) FROM messages")
+            )
+        ).scalars().all()
+
+        assert kinds == [None], f"expected SQL NULL, got {kinds}"
+
     async def test_unsupported_role_is_rejected_by_the_database(
         self, db_session: AsyncSession
     ) -> None:

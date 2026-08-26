@@ -20,7 +20,14 @@ from typing import ClassVar
 from pydantic import BaseModel
 
 from app.config import Settings
-from app.constants import LLMProviderId, ProviderKind
+from app.constants import LLMProviderId, MessageRole, ProviderKind
+
+
+class Message(BaseModel):
+    """One conversation turn as sent to a provider."""
+
+    role: MessageRole
+    content: str
 
 
 class ProviderStatus(BaseModel):
@@ -63,6 +70,14 @@ class ModelProvider(ABC):
 
         Returns (available, reason). Must not raise: an unreachable dependency
         is a normal outcome here.
+        """
+
+    @abstractmethod
+    async def generate(self, system: str, messages: list[Message]) -> str:
+        """Generate a reply to `messages` under the `system` instruction.
+
+        Raises ModelTimeoutError, ModelError or ProviderUnavailableError -- the
+        caller distinguishes "try again" from "pick another model".
         """
 
     async def status(self) -> ProviderStatus:

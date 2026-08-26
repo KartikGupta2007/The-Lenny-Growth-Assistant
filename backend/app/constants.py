@@ -34,6 +34,7 @@ Environment = Literal["development", "test", "production"]
 API_PREFIX = "/api"
 ROUTE_HEALTH = "/health"
 ROUTE_PROVIDERS = "/providers"
+ROUTE_SESSIONS = "/sessions"
 
 # ---------------------------------------------------------------------------
 # Model providers

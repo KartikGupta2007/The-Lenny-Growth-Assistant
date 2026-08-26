@@ -219,6 +219,20 @@ class TestVectorColumn:
         assert declared == f"vector({EMBEDDING_DIMENSIONS})"
 
 
+class TestMessageMetadata:
+    def test_the_column_exists_and_is_nullable(self, connection: Connection) -> None:
+        """Nullable so messages written before revision 0002 still load."""
+        row = connection.execute(
+            text(
+                "SELECT data_type, is_nullable FROM information_schema.columns "
+                "WHERE table_name = 'messages' AND column_name = 'metadata'"
+            )
+        ).one()
+
+        assert row.data_type == "jsonb"
+        assert row.is_nullable == "YES"
+
+
 class TestCheckConstraints:
     def test_role_and_type_constraints_exist(self, connection: Connection) -> None:
         names = set(

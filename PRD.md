@@ -4,10 +4,14 @@ The Lenny Growth Assistant
 
 Version: 1.0
 Status: Take-Home Assessment
-Implementation status: Foundation, model providers, database schema +
-persistence, transcript ingestion, embedding generation and vector retrieval
-are implemented. Answer generation, the agent, chat and artifact generation are
-not yet built. A retrieval evaluation set exists in evals/; the relevance
+Implementation status: The backend conversation path is complete --
+transcript ingestion, embeddings, vector retrieval, grounded generation, and
+persistent sessions/messages (POST /api/sessions/{id}/messages). There is no
+authentication, by design (section 5.2): a client supplies its own identifier
+in X-User-Id. The Ship 30 skill, artifact generation and the chat UI are not
+yet built. Assistant messages persist their source provenance, so a reopened
+conversation restores its citations. A retrieval evaluation set exists in
+evals/; the relevance
 metric in section 3 has not been measured yet. See README.md for the current
 breakdown.
 Target: Forward Deployed Engineer
