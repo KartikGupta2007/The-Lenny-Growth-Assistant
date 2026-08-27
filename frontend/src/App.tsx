@@ -1,120 +1,383 @@
 /**
- * Application shell.
+ * The chat application.
  *
- * Current scope: prove the frontend -> FastAPI boundary, surface backend
- * availability, and let the user choose the model that will answer. The
- * sidebar / chat / artifact-viewer layout from design.md section 3 is built
- * once the chat API exists.
+ * Data flow, in one place:
+ *
+ *   load providers + sessions -> select a session -> GET its messages
+ *   -> send a message -> append the user turn and the answer
+ *
+ * All state is plain React state; there is no store. All backend calls go
+ * through api/client.ts.
  */
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
-import { ApiError, fetchHealth, type HealthResponse } from './api/client';
-import { ModelSelector } from './components/ModelSelector';
-import type { ProviderId } from './constants';
+import {
+  createSession,
+  deleteSession,
+  getArtifact,
+  getSession,
+  listSessions,
+  sendMessage,
+  type Artifact,
+  type ArtifactSummary,
+  type ChatMessage,
+  type Session,
+  type Source,
+} from './api/client';
+import { ChatHeader } from './components/ChatHeader';
+import { Landing } from './components/Landing';
+import { MessageComposer } from './components/MessageComposer';
+import { MessageList } from './components/MessageList';
+import { Sidebar } from './components/Sidebar';
+import { SidePanel, type PanelContent } from './components/SidePanel';
+import { STORAGE_KEYS } from './constants';
+import { firstQuestion, getConversationTitle } from './conversationTitle';
 import { useProviders } from './hooks/useProviders';
+import { useTheme } from './hooks/useTheme';
 
-type ConnectionState =
-  | { status: 'checking' }
-  | { status: 'ready'; health: HealthResponse }
-  | { status: 'degraded'; message: string }
-  | { status: 'unreachable'; message: string };
+/** How many sidebar labels to fetch up front. */
+const LABELLED_SESSIONS = 30;
+
+function friendlyError(error: unknown): string {
+  // Backend messages are already user-safe; the client's own errors are too.
+  return error instanceof Error
+    ? error.message
+    : 'Something went wrong. Please try again.';
+}
+
+function storedCollapsed(): boolean {
+  try {
+    return localStorage.getItem(STORAGE_KEYS.sidebar) === 'true';
+  } catch {
+    return false;
+  }
+}
 
 export default function App() {
-  const [connection, setConnection] = useState<ConnectionState>({
-    status: 'checking',
-  });
-  const { state: providers, selected, select } = useProviders();
+  const { state: providerState, selected: provider, select } = useProviders();
+  const { resolved: theme, toggle: toggleTheme } = useTheme();
+
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [questions, setQuestions] = useState<Record<string, string>>({});
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [artifacts, setArtifacts] = useState<ArtifactSummary[]>([]);
+
+  const [panel, setPanel] = useState<PanelContent | null>(null);
+  const [artifact, setArtifact] = useState<Artifact | null>(null);
+  const [loadingArtifact, setLoadingArtifact] = useState(false);
+
+  const [loadingSessions, setLoadingSessions] = useState(true);
+  const [loadingMessages, setLoadingMessages] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [collapsed, setCollapsed] = useState(storedCollapsed);
 
   useEffect(() => {
-    const controller = new AbortController();
+    try {
+      localStorage.setItem(STORAGE_KEYS.sidebar, String(collapsed));
+    } catch {
+      // Non-fatal: the rail just will not be remembered.
+    }
+  }, [collapsed]);
 
-    fetchHealth(controller.signal)
-      .then((health) => setConnection({ status: 'ready', health }))
-      .catch((error: unknown) => {
-        if (controller.signal.aborted) return;
-        const message =
-          error instanceof Error
-            ? error.message
-            : 'Could not reach the assistant.';
-        // A 503 from /health means the backend is up but a dependency is not.
-        setConnection({
-          status: error instanceof ApiError ? 'degraded' : 'unreachable',
-          message,
-        });
-      });
+  // Escape closes the panel, unless a menu is open and handling it itself.
+  useEffect(() => {
+    if (!panel) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      if (document.querySelector('[role="listbox"]')) return;
+      setPanel(null);
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [panel]);
 
-    return () => controller.abort();
+  /** Remember a conversation's first question; the sidebar title derives from it. */
+  const rememberQuestion = useCallback((id: string, loaded: ChatMessage[]) => {
+    setQuestions((current) => ({ ...current, [id]: firstQuestion(loaded) }));
   }, []);
 
-  const handleSelect = (id: ProviderId) => {
-    select(id);
-  };
+  // Sessions, plus enough of each to label it. The list endpoint returns no
+  // messages, so labels need one small request each -- fine at this scale, and
+  // cheaper than adding a title column to the database.
+  useEffect(() => {
+    let cancelled = false;
 
-  const noModelAvailable =
-    providers.status === 'ready' && selected === null;
+    listSessions()
+      .then(async (loaded) => {
+        if (cancelled) return;
+        setSessions(loaded);
+        setLoadingSessions(false);
+
+        const details = await Promise.all(
+          loaded.slice(0, LABELLED_SESSIONS).map((session) =>
+            getSession(session.id).catch(() => null),
+          ),
+        );
+        if (cancelled) return;
+        setQuestions((current) => {
+          const next = { ...current };
+          for (const detail of details) {
+            if (detail) next[detail.id] = firstQuestion(detail.messages);
+          }
+          return next;
+        });
+      })
+      .catch((cause: unknown) => {
+        if (cancelled) return;
+        setLoadingSessions(false);
+        setError(friendlyError(cause));
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const openArtifact = useCallback(async (id: string) => {
+    setPanel({ kind: 'artifact', id });
+    setLoadingArtifact(true);
+    try {
+      setArtifact(await getArtifact(id));
+    } catch (cause) {
+      setArtifact(null);
+      setPanel(null);
+      setError(friendlyError(cause));
+    } finally {
+      setLoadingArtifact(false);
+    }
+  }, []);
+
+  const openSession = useCallback(
+    async (id: string) => {
+      setActiveId(id);
+      setSidebarOpen(false);
+      setError(null);
+      setPanel(null);
+      setArtifact(null);
+      setLoadingMessages(true);
+      try {
+        const detail = await getSession(id);
+        setMessages(detail.messages);
+        setArtifacts(detail.artifacts);
+        rememberQuestion(id, detail.messages);
+      } catch (cause) {
+        setMessages([]);
+        setArtifacts([]);
+        setError(friendlyError(cause));
+      } finally {
+        setLoadingMessages(false);
+      }
+    },
+    [rememberQuestion],
+  );
+
+  function startNewChat() {
+    setError(null);
+    setActiveId(null);
+    setMessages([]);
+    setArtifacts([]);
+    setPanel(null);
+    setArtifact(null);
+    setSidebarOpen(false);
+  }
+
+  /** Send into a known session. Used by both the landing and the chat. */
+  async function sendTo(sessionId: string, text: string) {
+    setError(null);
+    setSending(true);
+
+    // Show the question immediately; the id is replaced by the stored one.
+    const pending: ChatMessage = {
+      id: `pending-${Date.now()}`,
+      role: 'user',
+      content: text,
+      created_at: new Date().toISOString(),
+      sources: [],
+      grounded: null,
+      provider: null,
+    };
+    setMessages((current) => [...current, pending]);
+
+    try {
+      await sendMessage(sessionId, text, provider);
+      // Re-read the conversation so both turns carry their stored ids and
+      // provenance rather than a locally assembled approximation.
+      const detail = await getSession(sessionId);
+      setMessages(detail.messages);
+      setArtifacts(detail.artifacts);
+      rememberQuestion(sessionId, detail.messages);
+      // A turn that produced an artifact opens it straight away.
+      const fresh = detail.artifacts.find(
+        (a) => !artifacts.some((existing) => existing.id === a.id),
+      );
+      if (fresh) await openArtifact(fresh.id);
+      // The backend orders sessions by activity; mirror that locally.
+      setSessions((current) => {
+        const active = current.find((session) => session.id === sessionId);
+        if (!active) return current;
+        return [active, ...current.filter((session) => session.id !== sessionId)];
+      });
+    } catch (cause) {
+      setMessages((current) => current.filter((m) => m.id !== pending.id));
+      setError(friendlyError(cause));
+    } finally {
+      setSending(false);
+    }
+  }
+
+  async function send(text: string) {
+    if (activeId) await sendTo(activeId, text);
+  }
+
+  /** Asking from the landing screen creates the conversation on the way. */
+  async function ask(text: string) {
+    setError(null);
+    try {
+      const session = await createSession();
+      setSessions((current) => [session, ...current]);
+      setQuestions((current) => ({ ...current, [session.id]: text }));
+      setActiveId(session.id);
+      setMessages([]);
+      setArtifacts([]);
+      setPanel(null);
+      await sendTo(session.id, text);
+    } catch (cause) {
+      setError(friendlyError(cause));
+    }
+  }
+
+  async function remove(id: string) {
+    setError(null);
+    const remaining = sessions.filter((session) => session.id !== id);
+    try {
+      await deleteSession(id);
+      setSessions(remaining);
+      setQuestions((current) => {
+        const next = { ...current };
+        delete next[id];
+        return next;
+      });
+      if (id !== activeId) return;
+      // The active conversation went: fall back to the next one, or the
+      // landing screen when none are left.
+      if (remaining.length > 0) await openSession(remaining[0].id);
+      else startNewChat();
+    } catch (cause) {
+      setError(friendlyError(cause));
+    }
+  }
+
+  const providers =
+    providerState.status === 'ready' ? providerState.providers : [];
+  const composerDisabled = sending || provider === null;
+  const title = activeId
+    ? getConversationTitle(questions[activeId])
+    : 'New chat';
+
+  const composer = (
+    <MessageComposer
+      onSend={activeId ? send : ask}
+      disabled={composerDisabled}
+      sending={sending}
+      providers={providers}
+      provider={provider}
+      onSelectProvider={select}
+      autoFocus={messages.length === 0}
+    />
+  );
 
   return (
-    <main className="shell">
-      <header className="shell-header">
-        <h1>Lenny Growth Assistant</h1>
-        <p className="tagline">
-          Ask questions about product and growth using knowledge from
-          Lenny&apos;s Podcast.
-        </p>
-      </header>
+    <div className="app" data-panel={panel !== null} data-rail={collapsed}>
+      <Sidebar
+        sessions={sessions}
+        activeId={activeId}
+        questions={questions}
+        loading={loadingSessions}
+        open={sidebarOpen}
+        collapsed={collapsed}
+        theme={theme}
+        onSelect={openSession}
+        onDelete={remove}
+        onNewChat={startNewChat}
+        onClose={() => setSidebarOpen(false)}
+        onToggleCollapsed={() => setCollapsed(!collapsed)}
+        onToggleTheme={toggleTheme}
+      />
 
-      <section aria-live="polite" className="status">
-        {connection.status === 'checking' && <p>Connecting to the assistant…</p>}
+      {sidebarOpen && (
+        <button
+          type="button"
+          className="scrim"
+          aria-label="Close conversations"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
 
-        {connection.status === 'ready' && (
-          <p className="status-ok">
-            <span aria-hidden="true">●</span> Backend connected (
-            {connection.health.environment} · v{connection.health.version})
-          </p>
-        )}
+      <main className="chat">
+        <ChatHeader title={title} onOpenSidebar={() => setSidebarOpen(true)} />
 
-        {connection.status === 'degraded' && (
-          <p className="status-warn">
-            <span aria-hidden="true">▲</span> {connection.message}
-          </p>
-        )}
+        <div className="chat-body">
+          {error && (
+            <p className="chat-error" role="alert">
+              {error}
+            </p>
+          )}
 
-        {connection.status === 'unreachable' && (
-          <p className="status-error">
-            <span aria-hidden="true">✕</span> {connection.message}
-          </p>
-        )}
-      </section>
-
-      <section className="panel">
-        {providers.status === 'loading' && (
-          <p className="muted">Loading available models…</p>
-        )}
-
-        {providers.status === 'error' && (
-          <p className="status-error">
-            <span aria-hidden="true">✕</span> {providers.message}
-          </p>
-        )}
-
-        {providers.status === 'ready' && (
-          <>
-            <ModelSelector
-              providers={providers.providers}
-              selected={selected}
-              onSelect={handleSelect}
+          {activeId === null ? (
+            <Landing onPick={ask}>{composer}</Landing>
+          ) : loadingMessages ? (
+            <div className="messages">
+              <div className="skeleton-lines" aria-label="Loading conversation">
+                <span />
+                <span />
+                <span />
+              </div>
+            </div>
+          ) : (
+            <MessageList
+              messages={messages}
+              artifacts={artifacts}
+              sending={sending}
+              onOpenArtifact={openArtifact}
+              onOpenSource={(source: Source) => setPanel({ kind: 'source', source })}
             />
+          )}
+        </div>
 
-            {noModelAvailable && (
-              <p className="status-error" role="alert">
+        {activeId !== null && (
+          <div className="composer-dock">
+            {composer}
+            {provider === null && providers.length > 0 && (
+              <p className="chat-error" role="alert">
                 No model is available right now. Start Ollama locally, or
                 configure a cloud provider, to ask a question.
               </p>
             )}
-          </>
+          </div>
         )}
-      </section>
-    </main>
+      </main>
+
+      {panel !== null && (
+        <button
+          type="button"
+          className="scrim scrim-panel"
+          aria-label="Close panel"
+          onClick={() => setPanel(null)}
+        />
+      )}
+
+      {panel !== null && (
+        <SidePanel
+          content={panel}
+          artifact={artifact}
+          loading={loadingArtifact}
+          onClose={() => setPanel(null)}
+        />
+      )}
+    </div>
   );
 }

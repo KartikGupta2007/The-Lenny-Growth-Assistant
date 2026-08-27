@@ -35,6 +35,11 @@ class SessionRepository(BaseRepository):
         result = await self.session.execute(statement)
         return list(result.scalars().all())
 
+    async def delete(self, conversation: models.Session) -> None:
+        """Remove a conversation. Its messages go with it, via the cascade."""
+        await self.session.delete(conversation)
+        await self.session.flush()
+
     async def touch(self, session_id: uuid.UUID) -> None:
         """Mark a conversation as just active.
 

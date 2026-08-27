@@ -4,13 +4,16 @@ The Lenny Growth Assistant
 
 Version: 1.0
 Status: Take-Home Assessment
-Implementation status: The backend conversation path is complete --
+Implementation status: The application is complete end to end --
 transcript ingestion, embeddings, vector retrieval, grounded generation, and
 persistent sessions/messages (POST /api/sessions/{id}/messages). There is no
 authentication, by design (section 5.2): a client supplies its own identifier
 in X-User-Id. The Ship 30 skill, artifact generation and the chat UI are not
-yet built. Assistant messages persist their source provenance, so a reopened
-conversation restores its citations. A retrieval evaluation set exists in
+yet built -- except the Ship 30 skill and artifact system, which are now
+implemented: a Ship 30 essay produces a Markdown artifact and a page request
+produces sanitised HTML, both rendered in an isolated artifact panel. Assistant
+messages persist their source provenance, so a reopened conversation restores
+its citations. A retrieval evaluation set exists in
 evals/; the relevance
 metric in section 3 has not been measured yet. See README.md for the current
 breakdown.
@@ -965,7 +968,7 @@ Source grounding → Retrieval quality → Clear provenance → Reliable generat
                          User
                            │
                            ▼
-                  React / Next.js
+                   React + Vite
                            │
                            ▼
                        FastAPI

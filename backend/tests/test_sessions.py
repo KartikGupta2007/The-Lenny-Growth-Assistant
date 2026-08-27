@@ -653,3 +653,99 @@ class TestPersistedProvenance:
 
         for secret in ("sk-ant", "postgresql://", "neon.tech", "x-api-key"):
             assert secret not in reloaded
+
+
+# ---------------------------------------------------------------------------
+# Deleting a conversation
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteSession:
+    def test_delete_returns_no_content(self, api) -> None:
+        with api() as client:
+            session_id = start_session(client)
+            response = client.delete(f"/api/sessions/{session_id}")
+
+        assert response.status_code == 204
+        assert response.content == b""
+
+    def test_the_conversation_is_gone(self, api) -> None:
+        with api() as client:
+            session_id = start_session(client)
+            client.delete(f"/api/sessions/{session_id}")
+
+            assert client.get(f"/api/sessions/{session_id}").status_code == 404
+            assert client.get("/api/sessions").json() == []
+
+    def test_its_messages_go_with_it(self, api) -> None:
+        """Via the ON DELETE CASCADE, not a second delete."""
+        from app.db.session import get_sessionmaker
+
+        with api() as client:
+            session_id = start_session(client)
+            send(client, session_id, "a question")
+            client.delete(f"/api/sessions/{session_id}")
+
+            async def count() -> int:
+                async with get_sessionmaker()() as db:
+                    return (
+                        await db.execute(
+                            text(
+                                "SELECT count(*) FROM messages WHERE session_id = :s"
+                            ),
+                            {"s": uuid.UUID(session_id)},
+                        )
+                    ).scalar_one()
+
+            remaining = client.portal.call(count)  # type: ignore[attr-defined]
+
+        assert remaining == 0
+
+    def test_deleting_one_leaves_the_others(self, api) -> None:
+        with api() as client:
+            doomed = start_session(client)
+            kept = start_session(client)
+            send(client, kept, "keep me")
+
+            client.delete(f"/api/sessions/{doomed}")
+
+            listed = [s["id"] for s in client.get("/api/sessions").json()]
+            messages = client.get(f"/api/sessions/{kept}").json()["messages"]
+
+        assert listed == [kept]
+        assert [m["content"] for m in messages] == ["keep me", ANSWER]
+
+    def test_deleting_an_unknown_session_is_not_found(self, api) -> None:
+        with api() as client:
+            response = client.delete(f"/api/sessions/{uuid.uuid4()}")
+
+        assert response.status_code == 404
+        assert response.json()["error"]["code"] == "not_found"
+
+    def test_cannot_delete_another_users_session(self, api) -> None:
+        with api() as client:
+            theirs = start_session(client, USER_B)
+
+            response = client.delete(
+                f"/api/sessions/{theirs}", headers={"X-User-Id": str(USER_A)}
+            )
+
+            still_there = client.get(
+                f"/api/sessions/{theirs}", headers={"X-User-Id": str(USER_B)}
+            )
+
+        assert response.status_code == 404
+        assert still_there.status_code == 200, "their conversation survived"
+
+    def test_deleting_twice_is_not_found_the_second_time(self, api) -> None:
+        with api() as client:
+            session_id = start_session(client)
+
+            assert client.delete(f"/api/sessions/{session_id}").status_code == 204
+            assert client.delete(f"/api/sessions/{session_id}").status_code == 404
+
+    def test_a_malformed_id_is_rejected(self, api) -> None:
+        with api() as client:
+            response = client.delete("/api/sessions/not-a-uuid")
+
+        assert response.status_code == 422

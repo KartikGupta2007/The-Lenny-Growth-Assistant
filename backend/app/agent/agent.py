@@ -19,19 +19,27 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.agent.artifact_request import detect_artifact_request
 from app.agent.prompts import (
     INSUFFICIENT_EVIDENCE_ANSWER,
     SYSTEM_PROMPT,
     build_user_message,
 )
+from app.artifacts import sanitize_html
 from app.config import Settings, get_settings
 from app.db import models
-from app.db.repositories import MessageRepository, SessionRepository
-from app.errors import NotFoundError
+from app.constants import ARTIFACT_HTML, ARTIFACT_MARKDOWN, ArtifactType
+from app.db.repositories import (
+    ArtifactRepository,
+    MessageRepository,
+    SessionRepository,
+)
+from app.errors import ModelError, NotFoundError
 from app.logging_config import get_logger
 from app.models.base import Message, ModelProvider
 from app.models.registry import ProviderRegistry, get_provider_registry
 from app.retrieval import RetrievalResult, RetrievedChunk, retrieve
+from app.skills import generate_html_page, generate_ship30_essay
 
 logger = get_logger(__name__)
 
@@ -207,6 +215,19 @@ async def answer_in_conversation(
     async with session_factory() as session:
         result = await retrieve(session, question, settings=settings)
 
+    wanted = detect_artifact_request(question)
+    if wanted is not None and result.sufficient:
+        return await _answer_with_artifact(
+            session_factory,
+            conversation_id,
+            question,
+            result,
+            wanted,
+            provider_id=provider_id,
+            registry=registry,
+            provider=provider,
+        )
+
     answer = await answer_from_evidence(
         result,
         question,
@@ -227,6 +248,115 @@ async def answer_in_conversation(
         await session.commit()
 
     return message, answer
+
+
+async def _answer_with_artifact(
+    session_factory: async_sessionmaker[AsyncSession],
+    conversation_id: uuid.UUID,
+    question: str,
+    result: RetrievalResult,
+    kind: ArtifactType,
+    *,
+    provider_id: str | None,
+    registry: ProviderRegistry | None,
+    provider: ModelProvider | None,
+) -> tuple[models.Message, Answer]:
+    """Generate an artifact, then persist it against the assistant message.
+
+    The chat message is a short deterministic note; the artifact holds the
+    content, so a 1,250-word essay is not duplicated into the transcript.
+    """
+    if provider is None:
+        registry = registry or get_provider_registry()
+        provider = await registry.require(provider_id)
+
+    logger.info(
+        "artifact_generation_started", kind=kind, provider=provider.id,
+        evidence=len(result.chunks),
+    )
+    try:
+        if kind == ARTIFACT_MARKDOWN:
+            content = await generate_ship30_essay(provider, question, result.chunks)
+            title = _title_from(content) or "Ship 30 essay"
+        else:
+            content = sanitize_html(
+                await generate_html_page(provider, question, result.chunks)
+            )
+            title = "HTML artifact"
+    except ModelError:
+        # The model would not produce the artifact -- in practice because the
+        # evidence does not really cover the topic, even though enough chunks
+        # cleared the distance threshold. Decline rather than 502, and create
+        # nothing.
+        logger.info("artifact_declined", kind=kind)
+        return await _persist_decline(session_factory, conversation_id, kind)
+
+    sources = _to_sources(result.chunks)
+    answer = Answer(
+        answer=(
+            f"I've written this from {len(result.chunks)} passages across "
+            f"Lenny's Podcast. It's open in the panel beside this conversation."
+        ),
+        sources=sources,
+        grounded=True,
+        provider=provider.id,
+    )
+
+    async with session_factory() as session:
+        message = await MessageRepository(session).create(
+            session_id=conversation_id,
+            role="assistant",
+            content=answer.answer,
+            metadata=provenance(answer),
+        )
+        await ArtifactRepository(session).create(
+            session_id=conversation_id,
+            message_id=message.id,
+            artifact_type=kind,
+            title=title,
+            content=content,
+        )
+        await SessionRepository(session).touch(conversation_id)
+        await session.commit()
+
+    logger.info("artifact_generated", kind=kind, characters=len(content))
+    return message, answer
+
+
+async def _persist_decline(
+    session_factory: async_sessionmaker[AsyncSession],
+    conversation_id: uuid.UUID,
+    kind: ArtifactType,
+) -> tuple[models.Message, Answer]:
+    """Record that the corpus could not support the requested artifact."""
+    what = "essay" if kind == ARTIFACT_MARKDOWN else "page"
+    answer = Answer(
+        answer=(
+            f"I don't have enough material in Lenny's Podcast transcripts to "
+            f"write that {what} without inventing things, so I haven't."
+        ),
+        sources=[],
+        grounded=False,
+    )
+    async with session_factory() as session:
+        message = await MessageRepository(session).create(
+            session_id=conversation_id,
+            role="assistant",
+            content=answer.answer,
+            metadata=provenance(answer),
+        )
+        await SessionRepository(session).touch(conversation_id)
+        await session.commit()
+    return message, answer
+
+
+def _title_from(markdown: str) -> str | None:
+    """The essay's own first heading, for the panel header."""
+    for line in markdown.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            return stripped.lstrip("#").strip()[:200] or None
+    return None
 
 
 def provenance(answer: Answer) -> dict[str, Any]:

@@ -23,14 +23,14 @@ The design prioritizes source grounding, clear component boundaries, operational
                                 ▼
                     ┌──────────────────────┐
                     │      Frontend        │
-                    │    React / Next.js   │
+                    │     React + Vite     │
                     │                      │
                     │ Chat │ Sources       │
                     │ Model selector       │
                     │ Artifact Viewer      │
                     └──────────┬───────────┘
                                │
-                         HTTP / Streaming
+                          HTTP (JSON)
                                │
                                ▼
                     ┌──────────────────────┐
@@ -996,57 +996,74 @@ This keeps the deployment lightweight while satisfying the local LLM requirement
 
 23. Artifact Architecture
 
-Artifact generation is separated from artifact rendering.
+Implemented. backend/app/skills/, backend/app/artifacts/, backend/app/api/artifacts.py.
 
-User Request
-     │
-     ▼
-Agent
-     │
-     ▼
-Artifact Generator
-     │
-     ▼
-Generated Content
-     │
-     ▼
-Security Layer
-     │
-     ▼
-Artifact Viewer
+    question
+      |
+      v
+    detect_artifact_request      keyword match, not an LLM classifier
+      |
+      v
+    retrieval + evidence check   insufficient -> refuse, store nothing
+      |
+      v
+    skill                        ship30.py (Markdown) | html_page.py (HTML)
+      |
+      v
+    sanitise                     HTML only
+      |
+      v
+    artifacts table              linked to the assistant message
+      |
+      v
+    artifact panel
 
-⸻
+Generation is separate from normal grounded chat but reuses the same
+ModelProvider; there is no second provider abstraction and no skill registry --
+two skills, two functions.
+
+The assistant message stores a short note, not the artifact body, so a
+1,250-word essay is not duplicated into the conversation. The artifact carries
+its own content and links back by message_id.
+
+If the model refuses to produce the artifact -- which happens when enough
+chunks clear the distance threshold but the evidence does not really cover the
+topic -- the turn degrades to the grounded refusal and stores nothing, rather
+than returning an error.
 
 24. Artifact Security
 
-Generated HTML is considered untrusted.
+Generated HTML is untrusted. Three independent layers:
 
-The security boundary is:
+1. Script-bearing elements (script, noscript, template, object, embed, applet)
+   are removed with their contents. Stripping only the tag would leave the
+   script body as visible text.
+2. bleach allows a fixed layout/text tag set and removes every unknown tag,
+   every on* handler, and every URL scheme except http, https and mailto.
+   data: is refused because it can carry markup that some renderers execute.
+   Inline CSS is filtered to a property allow-list; position is excluded so an
+   artifact cannot escape its frame.
+3. The frontend renders it in <iframe sandbox="" srcdoc=...>. No
+   allow-scripts, no allow-same-origin: no JavaScript, no access to the parent
+   document, its storage or its cookies.
 
-Generated HTML
-      │
-      ▼
-Sanitization
-      │
-      ▼
-Restricted / Isolated Rendering
-      │
-      ▼
-Artifact Viewer
+Layer 3 means a miss in layers 1 and 2 still cannot execute. Sanitisation runs
+on the way in, so stored content is already safe -- POST /api/artifacts
+sanitises too, rather than trusting the caller.
 
-The implementation should prevent generated artifacts from gaining unintended access to:
+Artifacts are static by design. There is no JavaScript in an artifact.
 
-* Parent application state.
-* Authentication information.
-* Application cookies.
-* Sensitive APIs.
-* Other users’ data.
-
-The exact isolation mechanism will be selected during implementation based on the frontend technology.
-
-⸻
 
 25. Ship 30 for 30 Skill Architecture
+
+Implemented. backend/app/skills/ship30.py -- one prompt and one function.
+
+Targets ~1,250 words: a hook, ## headings marking the turns of the argument,
+selective bullets and bold, and a closing section with one specific action.
+Every claim must come from the supplied evidence and be attributed to the guest
+who said it. An essay that returns too short to be usable is rejected rather
+than stored.
+
 
 The essay feature is implemented as a dedicated skill rather than an ad-hoc prompt.
 
@@ -1171,7 +1188,9 @@ Cloud deployment
        Postgres Embedding Cloud LLM
        +pgvector   API
 
-Docker Compose or an equivalent reproducible workflow will be provided for local startup.
+Local startup is a Python virtualenv plus npm, wrapped by `./scripts/dev.sh`.
+There is no Docker in this implementation: the only service that would need a
+container is Postgres, and that is Neon.
 
 ⸻
 

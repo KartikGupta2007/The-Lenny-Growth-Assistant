@@ -35,6 +35,7 @@ API_PREFIX = "/api"
 ROUTE_HEALTH = "/health"
 ROUTE_PROVIDERS = "/providers"
 ROUTE_SESSIONS = "/sessions"
+ROUTE_ARTIFACTS = "/artifacts"
 
 # ---------------------------------------------------------------------------
 # Model providers

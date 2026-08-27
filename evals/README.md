@@ -27,10 +27,21 @@ relevance = cases where an expected source appears in the retrieved chunks
             ÷ cases with expected sources
 ```
 
+## Running it
+
+```bash
+python scripts/eval_retrieval.py            # summary
+python scripts/eval_retrieval.py --verbose  # every case, with the misses
+```
+
+It exits non-zero only if an off-corpus question produced an answer — that is
+the failure that matters. A changed hit rate is a number to look at, not a
+build break.
+
 ## What has and has not been measured
 
-The set was run once by hand against the full corpus (303 documents, 9,842
-chunks) to choose `RETRIEVAL_MAX_DISTANCE`. Results at top_k=8, threshold 0.45:
+Run against the full corpus (303 documents, 9,842 chunks) at top_k=8,
+threshold 0.45:
 
 | | |
 | --- | --- |
@@ -52,13 +63,15 @@ best-match distance, on-corpus  : 0.181 – 0.367   (median 0.272)
 best-match distance, off-corpus : 0.488 – 0.524   (median 0.508)
 ```
 
+The harness cannot print that off-corpus band: the retriever drops chunks past
+the threshold, so an off-corpus question comes back with none. The band was
+measured separately, with the threshold raised, and is what the threshold was
+chosen from.
+
 An empty band between 0.37 and 0.49 — which is where the 0.45 threshold came
 from. At the original 0.62, **zero** off-corpus questions were refused.
 
-There is no committed scoring harness yet. Building one belongs with the
-evaluation work, not with retrieval.
-
-## Running a case by hand
+## Running a single case by hand
 
 ```bash
 cd backend

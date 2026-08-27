@@ -631,13 +631,20 @@ Users should understand which evidence supports an answer without navigating to 
 
 ⸻
 
-22.3 Model Selector Based on Availability
+22.3 Model Selector Shows Unavailable Providers, Disabled
 
-Decision: Show only currently available model providers.
+Decision: Show every provider the backend knows about. One that cannot be used
+here stays visible but disabled, with the reason.
 
 Why:
 
-A deployed environment may not have Ollama. Displaying an unavailable provider would create a broken interaction.
+A deployed environment may not have Ollama. Hiding it would leave the user
+wondering whether local models exist at all; showing it disabled answers the
+question and explains the environment. The backend refuses a disabled provider
+anyway, so the UI is a courtesy rather than the control.
+
+Implemented as a listbox popover in the composer, not a native select: the
+options carry a kind badge, the model id and an explanation.
 
 ⸻
 
@@ -665,11 +672,41 @@ Users may work on product/growth questions over multiple conversations and shoul
 
 22.6 Progressive Disclosure of Sources
 
-Decision: Show source names initially and expose additional metadata on interaction.
+Decision: Two levels of disclosure. Citation markers in the answer text are
+clickable and open that episode in the side panel; beneath the answer a single
+collapsed row names the number of sources, expanding to the full list.
 
 Why:
 
-This balances transparency with readability.
+This balances transparency with readability. Eight retrieved chunks routinely
+come from four or five episodes, so the list is grouped by episode -- and
+because only about half of answers actually emit `[n]` markers (smaller local
+models often omit them), the collapsed row is always present. Sources are never
+invisible, whichever the model did.
+
+⸻
+
+22.7 One Side Panel, Two Kinds of Content
+
+Decision: The right-hand panel shows either a generated artifact or a cited
+source.
+
+Why:
+
+Both are "the thing behind the answer", both want the same width and the same
+close behaviour, and one panel keeps the layout predictable.
+
+⸻
+
+22.8 Theme
+
+Decision: Light and dark are both designed. The application follows the
+operating system by default and offers a toggle in the sidebar footer.
+
+Why:
+
+The default respects the environment; the toggle means a reviewer can see
+either without changing their machine.
 
 ⸻
 
@@ -713,7 +750,7 @@ Component	States
 Chat	Empty, active, loading, error
 Message	Sending, generated, failed
 Retrieval	Searching, results, no results, failed
-Sources	Collapsed, expanded
+Sources	Collapsed, expanded, opened in the panel
 Model	Available, unavailable, switching
 Artifact	Empty, generating, rendered, failed
 Session	New, active, archived/history

@@ -10,12 +10,13 @@ Answers cite the episodes they came from, follow-up questions keep session
 context, and the assistant can turn what it finds into a Ship 30 for 30-style
 essay or a rendered Markdown / HTML artifact shown beside the chat.
 
-> **Implementation status — the whole backend conversation path works:
-> ingestion, embeddings, retrieval, grounded generation, and persistent
-> sessions.** The Ship 30 skill, artifacts and the chat UI are not yet built.
-> This README documents only what is actually built and verified. Sections
-> marked *Not yet implemented* are planned but absent. See
-> [Implementation status](#implementation-status) for the full breakdown.
+> **Implementation status — the application works end to end**, including
+> artifacts: ingestion, embeddings, retrieval, grounded generation, persistent
+> sessions, a chat UI with source citations, the Ship 30 essay skill and
+> sanitised HTML artifacts.
+> This README documents only what is actually built and verified. See
+> [Implementation status](#implementation-status) for the phase-by-phase
+> breakdown.
 
 ---
 
@@ -26,7 +27,9 @@ essay or a rendered Markdown / HTML artifact shown beside the chat.
 | [PRD.md](PRD.md) | Product requirements, scope, success metrics, acceptance criteria |
 | [design.md](design.md) | UI/UX design, information architecture, interaction states |
 | [architecture.md](architecture.md) | System architecture, data model, component boundaries, trade-offs |
-| [evals/](evals/) | Retrieval evaluation set — the foundation for measuring relevance |
+| [evals/](evals/) | Retrieval evaluation set, and the measured results |
+| [MANUAL-TEST-PLAN.md](MANUAL-TEST-PLAN.md) | Manual UI test plan — the checks automation does not cover |
+| [agent-transcripts/](agent-transcripts/) | Coding-agent sessions from building this, including the failed attempts |
 
 ---
 
@@ -90,6 +93,17 @@ corpus needs roughly a further 300 MB of disk.
 
 ### 1. Database
 
+Any PostgreSQL with `pgvector` works. This was built and verified against
+[Neon](https://neon.tech), whose free tier has pgvector already installed —
+create a project, copy the connection string into `backend/.env`, and there is
+nothing to install:
+
+```
+DATABASE_URL=postgresql://user:password@host.neon.tech/neondb?sslmode=require
+```
+
+Locally instead:
+
 ```bash
 createdb lenny_growth_assistant
 psql -d lenny_growth_assistant -c "CREATE EXTENSION IF NOT EXISTS vector;"
@@ -101,11 +115,12 @@ psql -d lenny_growth_assistant_test -c "CREATE EXTENSION IF NOT EXISTS vector;"
 
 A Homebrew PostgreSQL install has no `postgres` role — it creates a superuser
 matching your macOS username. The default `DATABASE_URL` therefore omits the
-username so psycopg falls back to your OS user. For a managed or Linux
-instance, set the explicit form in `backend/.env`:
+username so psycopg falls back to your OS user.
 
-```
-DATABASE_URL=postgresql+psycopg://user:password@host:5432/lenny_growth_assistant
+Either way, apply the schema:
+
+```bash
+cd backend && alembic upgrade head
 ```
 
 ### 2. Backend
@@ -131,7 +146,12 @@ cp .env.example .env
 
 ## Running
 
-Two terminals:
+```bash
+./scripts/dev.sh
+```
+
+That starts both and stops both on Ctrl-C. It is a convenience over the two
+terminals below, not a different code path:
 
 ```bash
 # Terminal 1 — API on http://localhost:8000
@@ -675,6 +695,141 @@ break the sidebar's ordering.
 
 ---
 
+## Artifacts
+
+Ask for an essay or a page and the answer arrives as an artifact beside the
+conversation instead of inside it.
+
+```
+"Write a Ship 30 essay about product-market fit."   → Markdown artifact
+"Build me a landing page about growth loops."       → sanitised HTML artifact
+```
+
+```
+question → retrieval → evidence check → skill → sanitise (HTML) → store → panel
+```
+
+The request is recognised by keyword matching in
+[`agent/artifact_request.py`](backend/app/agent/artifact_request.py) —
+deliberately not an LLM classifier, so a normal question can never
+accidentally become a 1,250-word essay.
+
+**The chat message stays short.** The artifact holds the content; the message
+is a one-line note plus its sources, so a long essay is not duplicated into the
+transcript.
+
+**Insufficient evidence produces no artifact** — the usual grounded refusal,
+and nothing is stored.
+
+| | |
+| --- | --- |
+| `POST /api/artifacts` | store an artifact in one of your conversations → 201 |
+| `GET /api/artifacts/{id}` | read one back |
+
+`GET /api/sessions/{id}` lists a conversation's artifacts, so reopening it
+restores them. Deleting a conversation deletes its artifacts through the
+existing cascade.
+
+### Ship 30 skill
+
+[`skills/ship30.py`](backend/app/skills/ship30.py) — one prompt, one function.
+Targets ~1,250 words with a hook, `##` headings marking the turns of the
+argument, selective bullets and bold, and a closing section with one specific
+action. Every claim must come from the evidence, attributed to the guest who
+said it. An essay that comes back too short to be usable is rejected rather
+than stored.
+
+### HTML sanitisation
+
+Generated HTML is untrusted (PRD section 14). Three independent layers:
+
+1. **Script-like elements are removed with their contents** —
+   `script`, `noscript`, `template`, `object`, `embed`, `applet`. Stripping
+   only the tag would leave the script body behind as visible text.
+2. **bleach allows a fixed set of layout and text tags**, drops every unknown
+   tag, every `on*` handler attribute, and every URL that is not
+   `http`/`https`/`mailto`. `data:` is refused too — it can carry markup some
+   renderers execute. Inline CSS is filtered to a property allow-list;
+   `position` is not on it, so an artifact cannot escape its frame.
+3. **The viewer renders it in `<iframe sandbox="" srcdoc=…>`** — no
+   `allow-scripts`, no `allow-same-origin`. The frame has no JavaScript, no
+   access to the parent page, and no access to its storage or cookies.
+
+Layer 3 means even a miss in 1 and 2 cannot execute. Sanitisation happens on
+the way *in*, so what is stored is already safe — nothing relies on a caller
+having sanitised first.
+
+**Limitation:** artifacts are static by design. There is no JavaScript in an
+artifact, and there will not be — the sandbox has no `allow-scripts` and the
+sanitiser removes scripts before storage.
+
+---
+
+## Using the app
+
+Two terminals (see [Running](#running)), then open <http://localhost:5173>.
+
+```
+┌────────────────────┬──────────────────────────────────────┐
+│ + New chat         │ Lenny Growth Assistant   ( ) Ollama  │
+│                    │                          (•) Claude  │
+│ What does Lenny…   ├──────────────────────────────────────┤
+│ New conversation   │ YOU        How do I improve retention?│
+│                    │ ASSISTANT  Cohort curves tell you…[1]│
+│                    │            Sources                   │
+│                    │            [1] Episode — Guest       │
+│                    │                Watch episode →       │
+│                    ├──────────────────────────────────────┤
+│                    │ [ Ask about product, growth… ] Send  │
+└────────────────────┴──────────────────────────────────────┘
+```
+
+**Sessions.** *New chat* creates one; the sidebar lists them most-recently-active
+first. There is no `title` column — the sidebar title is derived client-side
+from the conversation's first question, collapsed to a single line and cut to
+~45 characters on a word boundary. The full question stays as the row's
+tooltip and is untouched in the conversation itself. Under 900px the sidebar
+becomes a drawer behind the ☰ button.
+
+**Deleting a conversation.** Each row has a delete button that appears on hover
+or keyboard focus, so the sidebar stays quiet but the control stays reachable.
+One click asks *Delete?* inline — it never deletes on the first click, and
+Escape or *Cancel* backs out. `DELETE /api/sessions/{id}` removes the
+conversation; its messages go with it through the existing foreign-key cascade.
+If the deleted conversation was open, the next one opens; if it was the last,
+the empty state returns.
+
+**Provider selection.** The header lists what `GET /api/providers` reports. An
+unavailable provider stays visible but disabled, with the backend's reason as
+its tooltip and its accessible description. The frontend duplicates no
+availability logic.
+
+**Source citations.** Every assistant answer shows the episodes it used —
+number, title, guest, and a link to the episode that opens in a new tab with
+`rel="noopener noreferrer"`. The URLs come from `messages.metadata`, which the
+backend built from the retrieval result. **No URL is ever parsed out of the
+model's text**, so a citation the model invented cannot become a link.
+Reopening a conversation restores its citations.
+
+**Insufficient evidence.** When the backend reports `grounded: false` the
+answer is styled distinctly and carries a note; no source section is shown.
+The frontend never decides whether evidence was sufficient.
+
+**Artifact panel.** An essay or page opens in a third column on wide screens,
+and as an overlay below 1200px so the chat is never squeezed. Each message that
+produced an artifact keeps an *Open* button, so a reopened conversation gets its
+artifact back.
+
+**Composer.** Enter sends, Shift+Enter adds a line. Sending is blocked while a
+request is in flight, and a message over 2,000 characters is rejected in the UI
+with the count rather than being sent and failing.
+
+Answers are not streamed. A local Ollama answer takes 30–80 seconds, during
+which the conversation stays visible and a "searching the transcripts" state is
+shown; Claude takes about 15.
+
+---
+
 ## Constants
 
 | File | Holds |
@@ -811,24 +966,39 @@ source .venv/bin/activate
 python -m pytest
 ```
 
-Current state — **127 tests, all passing**:
+Current state — **371 tests, all passing** in ~9s:
 
-| File | Covers |
-| --- | --- |
-| `tests/test_api.py` | Health (ok + degraded), request-id correlation, security headers, docs disabled in production, structured error envelope, no internal detail leaked on unhandled errors |
-| `tests/test_config.py` | Embedding-dimension derivation, unmapped-model failure, list parsing (CSV + JSON), env policy switches, production CORS guard, secret redaction in `repr` |
-| `tests/test_providers.py` | Provider availability in each environment, Ollama disabled but still reported in production, default fallback, server-side rejection, missing/blank API key, Ollama tag matching, `GET /api/providers` payload |
-| `tests/test_constants.py` | Backend/frontend constant drift (provider ids, kinds, error codes, routes), immutable shared containers, no `os.environ` read outside `config.py` |
-| `tests/test_persistence.py` | Every repository against real PostgreSQL: users, sessions, messages and their ordering, artifacts, documents, content-hash lookup and upsert semantics, chunks, provenance join, the vector column, cascades and foreign keys |
-| `tests/test_migrations.py` | Zero drift between migrations and models, single head, tables, foreign-key delete actions, indexes, HNSW method and operator class, pgvector extension, timezone-aware timestamps |
-| `tests/test_ingestion.py` | Discovery (and what it ignores), frontmatter parsing, metadata gaps, cleaning, chunk order/overlap/determinism, oversized paragraphs, invalid transcripts, content hashing, skip-unchanged, reprocess-changed, removal cleanup, `--limit` behaviour, NULL embeddings |
-| `tests/test_embeddings.py` | Provider batching and dimension validation, unreachable/timeout/missing-model errors, no credentials in errors, NULL-only selection, persistence, idempotence, `--limit` window semantics, per-batch failure safety |
-| `tests/test_retrieval.py` | Query embedded (and only the query), exact cosine distances, ordering, `top_k`, threshold filtering, minimum-chunk rule, insufficient evidence, provenance, HNSW index used, corpus unmodified, provider failure propagation |
-| `tests/test_agent.py` | Retrieval before generation, evidence reaches the model, no ids or URLs sent to it, sources come from retrieval not the model, LLM never called on insufficient evidence, deterministic decline, history passed and capped, Ollama + Claude generation via mock transports, timeout/empty/auth failures |
-| `tests/test_sessions.py` | Session create/list/get, user isolation, unknown session, both turns persisted, message ordering, follow-up history, retrieval uses the current question, decline persisted, failed generation leaves no assistant message and can be retried, validation, no credential in a response |
+| File | Tests | Covers |
+| --- | --- | --- |
+| `tests/test_api.py` | 12 | Health (ok + degraded), request-id correlation, security headers, docs disabled in production, structured error envelope, no internal detail leaked on unhandled errors |
+| `tests/test_config.py` | 29 | Embedding-dimension derivation, unmapped-model failure, list parsing (CSV + JSON), env policy switches, production CORS guard, secret redaction in `repr` |
+| `tests/test_providers.py` | 20 | Provider availability in each environment, Ollama disabled but still reported in production, default fallback, server-side rejection, missing/blank API key, Ollama tag matching, `GET /api/providers` payload |
+| `tests/test_constants.py` | 9 | Backend/frontend constant drift (provider ids, kinds, error codes, routes), immutable shared containers, no `os.environ` read outside `config.py` |
+| `tests/test_persistence.py` | 50 | Every repository against real PostgreSQL: users, sessions, messages and their ordering, artifacts, documents, content-hash lookup and upsert semantics, chunks, provenance join, the vector column, cascades and foreign keys |
+| `tests/test_migrations.py` | 13 | Zero drift between migrations and models, single head, tables, foreign-key delete actions, indexes, HNSW method and operator class, pgvector extension, timezone-aware timestamps |
+| `tests/test_ingestion.py` | 48 | Discovery (and what it ignores), frontmatter parsing, metadata gaps, cleaning, chunk order/overlap/determinism, oversized paragraphs, invalid transcripts, content hashing, skip-unchanged, reprocess-changed, removal cleanup, `--limit` behaviour, NULL embeddings |
+| `tests/test_embeddings.py` | 35 | Provider batching and dimension validation, unreachable/timeout/missing-model errors, no credentials in errors, NULL-only selection, persistence, idempotence, `--limit` window semantics, per-batch failure safety |
+| `tests/test_retrieval.py` | 21 | Query embedded (and only the query), exact cosine distances, ordering, `top_k`, threshold filtering, minimum-chunk rule, insufficient evidence, provenance, HNSW index used, corpus unmodified, provider failure propagation |
+| `tests/test_agent.py` | 33 | Retrieval before generation, evidence reaches the model, no ids or URLs sent to it, sources come from retrieval not the model, LLM never called on insufficient evidence, deterministic decline, history passed and capped, Ollama + Claude generation via mock transports, timeout/empty/auth failures |
+| `tests/test_sessions.py` | 52 | Session create/list/get, user isolation, unknown session, both turns persisted, message ordering, follow-up history, retrieval uses the current question, decline persisted, failed generation leaves no assistant message and can be retried, validation, no credential in a response |
+| `tests/test_artifacts.py` | 49 | HTML sanitisation (scripts, handlers, dangerous URLs, safe markup and CSS surviving), both skills, generation through chat, insufficient evidence creating nothing, artifact API access control, persistence |
 
 The frontend has its own gate, run by `npm run lint` and `npm run build`:
 `scripts/check-boundary.mjs` — see [The frontend boundary](#the-frontend-boundary).
+`npm run build` also typechecks (`tsc -b`).
+
+Retrieval quality is measured separately, against the live corpus:
+
+```bash
+python scripts/eval_retrieval.py --verbose
+```
+
+It scores the 23 cases in [evals/](evals/) and fails only if an off-corpus
+question produced an answer. See [evals/README.md](evals/README.md) for what
+the numbers do and do not mean.
+
+What automation cannot check — layout, focus order, whether an answer reads as
+grounded — is in [MANUAL-TEST-PLAN.md](MANUAL-TEST-PLAN.md).
 
 Model-provider tests stub the Ollama probe and contact no cloud provider, so
 they pass on a machine with no daemon running. Settings are built with
@@ -873,10 +1043,10 @@ Phases follow the plan in [PRD.md](PRD.md) section 23.
 | 4 | Retrieval: query embedding, pgvector similarity search, relevance threshold, provenance | **Complete** |
 | 5 | Grounded generation: agent, prompt, `POST /api/chat`, source attribution | **Complete** |
 | 6 | Session + message persistence, session API | **Complete** |
-| 6b | Conversational UI, source display, provider selection in chat | Not yet implemented |
-| 7 | Ship 30 for 30 skill, artifact generation, artifact viewer, HTML sanitisation | Not yet implemented |
-| 8 | Error handling hardening, observability, full test suite | Not yet implemented |
-| 9 | Documentation sync, clean-environment verification, manual UI test plan | Not yet implemented |
+| 6b | Chat UI: sessions sidebar, messages, source chips, model selector | **Complete** |
+| 7 | Ship 30 skill, artifact generation, artifact viewer, HTML sanitisation | **Complete** |
+| 8 | Error handling hardening, observability, full test suite | **Complete** |
+| 9 | Documentation sync, evaluation harness, manual UI test plan, agent transcripts | **Complete** |
 
 ### What Phase 1 delivered
 
@@ -911,8 +1081,8 @@ Phases follow the plan in [PRD.md](PRD.md) section 23.
 - `frontend/src/hooks/useProviders.ts` — validates a remembered choice against
   the live list, so a stale `localStorage` value cannot pin the UI to a
   provider that is no longer available
-- `frontend/src/components/ModelSelector.tsx` — accessible radio group that
-  renders disabled providers with their reason
+- `frontend/src/components/ModelSelector.tsx` — listbox popover with arrow-key
+  navigation that renders disabled providers with their reason
 
 ---
 

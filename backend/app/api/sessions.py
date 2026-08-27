@@ -16,13 +16,18 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, Response
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent import answer_in_conversation
-from app.constants import LLMProviderId, MessageRole, ROUTE_SESSIONS
-from app.db.repositories import MessageRepository, SessionRepository, UserRepository
+from app.constants import ArtifactType, LLMProviderId, MessageRole, ROUTE_SESSIONS
+from app.db.repositories import (
+    ArtifactRepository,
+    MessageRepository,
+    SessionRepository,
+    UserRepository,
+)
 from app.db.session import get_session, get_sessionmaker
 from app.errors import NotFoundError
 
@@ -94,8 +99,19 @@ class MessageResponse(BaseModel):
         )
 
 
+class ArtifactSummary(BaseModel):
+    """Enough to list artifacts and fetch one; content comes from GET."""
+
+    id: uuid.UUID
+    message_id: uuid.UUID | None
+    type: ArtifactType
+    title: str
+    created_at: datetime
+
+
 class SessionDetailResponse(SessionResponse):
     messages: list[MessageResponse]
+    artifacts: list[ArtifactSummary]
 
 
 class SendMessageRequest(BaseModel):
@@ -157,13 +173,33 @@ async def get_session_detail(
         raise NotFoundError("That conversation does not exist.")
 
     messages = await MessageRepository(session).list_by_session(session_id)
+    artifacts = await ArtifactRepository(session).list_by_session(session_id)
     return SessionDetailResponse(
         id=conversation.id,
         user_id=conversation.user_id,
         created_at=conversation.created_at,
         updated_at=conversation.updated_at,
         messages=[MessageResponse.of(m) for m in messages],
+        artifacts=[
+            ArtifactSummary.model_validate(a, from_attributes=True) for a in artifacts
+        ],
     )
+
+
+@router.delete(f"{ROUTE_SESSIONS}/{{session_id}}", status_code=204)
+async def delete_session(
+    session_id: uuid.UUID,
+    user_id: uuid.UUID = Depends(current_user_id),
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    """Delete a conversation and its messages."""
+    repository = SessionRepository(session)
+    conversation = await repository.get(session_id)
+    if conversation is None or conversation.user_id != user_id:
+        raise NotFoundError("That conversation does not exist.")
+
+    await repository.delete(conversation)
+    return Response(status_code=204)
 
 
 @router.post(

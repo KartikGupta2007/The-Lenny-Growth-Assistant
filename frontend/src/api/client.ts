@@ -11,6 +11,9 @@ import {
   DEFAULT_TIMEOUT_MS,
   ENDPOINTS,
   ERROR_CODES,
+  STORAGE_KEYS,
+  USER_ID_HEADER,
+  type ArtifactType,
   type ProviderId,
   type ProviderKind,
 } from '../constants';
@@ -186,4 +189,143 @@ export async function fetchProviders(
   signal?: AbortSignal,
 ): Promise<ProvidersResponse> {
   return request<ProvidersResponse>(ENDPOINTS.providers, { signal });
+}
+
+// ---------------------------------------------------------------------------
+// Identity
+// ---------------------------------------------------------------------------
+
+/**
+ * This browser's user id, minted on first use and kept in localStorage.
+ *
+ * Sent as X-User-Id so the backend can scope sessions without authentication.
+ * A private window or cleared storage simply starts a fresh history.
+ */
+function userId(): string {
+  try {
+    const existing = localStorage.getItem(STORAGE_KEYS.userId);
+    if (existing) return existing;
+    const minted = crypto.randomUUID();
+    localStorage.setItem(STORAGE_KEYS.userId, minted);
+    return minted;
+  } catch {
+    // Storage unavailable: usable for this page load, not remembered.
+    return crypto.randomUUID();
+  }
+}
+
+function identified(signal?: AbortSignal): RequestInit & { timeoutMs?: number } {
+  return { signal, headers: { [USER_ID_HEADER]: userId() } };
+}
+
+// ---------------------------------------------------------------------------
+// Sessions and messages
+// ---------------------------------------------------------------------------
+
+export interface Session {
+  id: string;
+  user_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** A citation. Every field is the backend's; none is parsed from model text. */
+export interface Source {
+  number: number;
+  document_id: string;
+  chunk_id: string;
+  title: string;
+  guest: string | null;
+  source_url: string | null;
+  chunk_index: number;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  created_at: string;
+  sources: Source[];
+  /** null on user turns; false when the corpus could not support an answer. */
+  grounded: boolean | null;
+  provider: ProviderId | null;
+}
+
+/** Listed with a session; `content` comes from getArtifact. */
+export interface ArtifactSummary {
+  id: string;
+  message_id: string | null;
+  type: ArtifactType;
+  title: string;
+  created_at: string;
+}
+
+export interface Artifact extends ArtifactSummary {
+  session_id: string;
+  content: string;
+  updated_at: string;
+}
+
+export interface SessionDetail extends Session {
+  messages: ChatMessage[];
+  artifacts: ArtifactSummary[];
+}
+
+export interface SendMessageResponse {
+  message: ChatMessage;
+  sources: Source[];
+  grounded: boolean;
+  provider: ProviderId | null;
+}
+
+export async function createSession(signal?: AbortSignal): Promise<Session> {
+  return request<Session>(ENDPOINTS.sessions, {
+    ...identified(signal),
+    method: 'POST',
+  });
+}
+
+export async function listSessions(signal?: AbortSignal): Promise<Session[]> {
+  return request<Session[]>(ENDPOINTS.sessions, identified(signal));
+}
+
+export async function getSession(
+  id: string,
+  signal?: AbortSignal,
+): Promise<SessionDetail> {
+  return request<SessionDetail>(`${ENDPOINTS.sessions}/${id}`, identified(signal));
+}
+
+export async function getArtifact(
+  id: string,
+  signal?: AbortSignal,
+): Promise<Artifact> {
+  return request<Artifact>(`${ENDPOINTS.artifacts}/${id}`, identified(signal));
+}
+
+export async function deleteSession(id: string): Promise<void> {
+  await request<null>(`${ENDPOINTS.sessions}/${id}`, {
+    ...identified(),
+    method: 'DELETE',
+  });
+}
+
+/**
+ * Ask a question. Generation can take over a minute on a local model, so this
+ * call gets its own timeout rather than the default.
+ */
+export async function sendMessage(
+  sessionId: string,
+  message: string,
+  provider?: ProviderId | null,
+): Promise<SendMessageResponse> {
+  return request<SendMessageResponse>(
+    `${ENDPOINTS.sessions}/${sessionId}/messages`,
+    {
+      ...identified(),
+      method: 'POST',
+      body: JSON.stringify({ message, provider: provider ?? null }),
+      timeoutMs: 300_000,
+    },
+  );
 }
