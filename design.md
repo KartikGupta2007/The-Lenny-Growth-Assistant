@@ -700,13 +700,17 @@ close behaviour, and one panel keeps the layout predictable.
 
 22.8 Theme
 
-Decision: Light and dark are both designed. The application follows the
-operating system by default and offers a toggle in the sidebar footer.
+Decision: Light and dark are both designed. **Light is the default**,
+regardless of the operating system setting, with a toggle in the sidebar
+footer that remembers the choice.
 
 Why:
 
-The default respects the environment; the toggle means a reviewer can see
-either without changing their machine.
+A grounded-answer product is read like a document, and light is the better
+default for long cited prose. Not following the OS also makes the first
+impression predictable: every reviewer sees the same thing. An inline script
+in `index.html` applies a stored dark choice before first paint, so returning
+users get no flash of light.
 
 ⸻
 

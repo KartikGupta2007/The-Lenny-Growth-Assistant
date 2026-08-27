@@ -84,8 +84,9 @@ if you want to move quickly.
 | 36a | Click a superscript citation in an answer | The side panel opens on that episode, with a "Watch the episode" link |
 | 36b | Click a **N sources** row | Expands to the episodes, deduplicated, each opening the panel |
 | 36c | Open the model menu, press ↓/↑ then Esc | Focus moves between options; Esc closes and returns focus to the trigger |
-| 36d | Click the theme button in the sidebar footer | Light and dark swap; the choice survives a reload |
-| 36e | Collapse the sidebar with the top-left button | Becomes a 60px icon rail; still collapsed after a reload |
+| 36d | Open the app on a machine set to dark mode | Loads **light** — the OS setting is deliberately not followed |
+| 36e | Click the theme button in the sidebar footer | Light and dark swap; the choice survives a reload, with no flash on load |
+| 36f | Collapse the sidebar with the top-left button | Becomes a 60px icon rail; still collapsed after a reload |
 | 37 | Press Escape on a delete confirmation | Cancels |
 | 38 | Type a question and press Enter | Sends |
 | 39 | Press Shift+Enter | New line, does not send |

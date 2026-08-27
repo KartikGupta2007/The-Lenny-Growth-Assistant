@@ -56,7 +56,7 @@ function storedCollapsed(): boolean {
 
 export default function App() {
   const { state: providerState, selected: provider, select } = useProviders();
-  const { resolved: theme, toggle: toggleTheme } = useTheme();
+  const { theme, toggle: toggleTheme } = useTheme();
 
   const [sessions, setSessions] = useState<Session[]>([]);
   const [questions, setQuestions] = useState<Record<string, string>>({});

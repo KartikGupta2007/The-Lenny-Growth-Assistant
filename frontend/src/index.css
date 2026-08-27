@@ -46,7 +46,8 @@
   --sidebar-width: 264px;
   --rail-width: 60px;
 
-  /* Light palette: cool slate neutrals. */
+  /* Light palette: cool slate neutrals. Light is the default; the dark
+     overrides live in :root[data-theme='dark'] below. */
   --bg: #f6f7f9;
   --surface: #ffffff;
   --raised: #ffffff;
@@ -75,36 +76,6 @@
   --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
 
   color-scheme: light;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme='light']) {
-    --bg: #0f1115;
-    --surface: #16181d;
-    --raised: #1c1f26;
-    --hover: #22262f;
-    --border: #262a33;
-    --border-strong: #343945;
-    --text: #e8eaee;
-    --text-muted: #9aa1ae;
-    --text-faint: #878f9d;
-
-    --accent: #7c8cf8;
-    --accent-hover: #8e9cff;
-    --accent-soft: #1e2340;
-    --on-accent: #0f1115;
-
-    --ok: #4ec37f;
-    --warn: #d9a333;
-    --error: #f0827c;
-    --error-soft: #2a1a1a;
-
-    --shadow-sm: 0 1px 2px rgb(0 0 0 / 30%);
-    --shadow-md: 0 4px 12px -2px rgb(0 0 0 / 40%);
-    --shadow-lg: 0 16px 40px -8px rgb(0 0 0 / 55%);
-
-    color-scheme: dark;
-  }
 }
 
 :root[data-theme='dark'] {
