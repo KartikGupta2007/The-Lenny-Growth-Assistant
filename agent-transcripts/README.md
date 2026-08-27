@@ -1,15 +1,21 @@
 # Agent transcripts
 
 Coding-agent sessions from building this project, as required by the
-assignment. Five sessions, exported from Claude Code's own session logs.
+assignment. Seven sessions, exported from Claude Code's own session logs —
+**756 prompts and replies** in total.
 
-| File | Turns |
-| --- | --- |
-| `c25978e2-…md` | 1041 — the main build: schema, ingestion, embeddings, retrieval, RAG, sessions, chat UI, artifacts |
-| `79e0301b-…md` | 390 |
-| `593e10fb-…md` | 159 |
-| `c32289d7-…md` | 47 |
-| `d177325a-…md` | 47 |
+| File | Turns | Tool calls | What it covers |
+| --- | --- | --- | --- |
+| `ab875f92-…md` | 336 | 592 | Final production hardening, the assignment audit, and the UI/UX redesign |
+| `c25978e2-…md` | 278 | 470 | The main build: schema, ingestion, embeddings, retrieval, RAG, sessions, chat UI, artifacts |
+| `79e0301b-…md` | 98 | 146 | Planning from the assignment brief: PRD, architecture and design documents |
+| `593e10fb-…md` | 23 | 65 | Codebase review and the model-provider layer |
+| `2446708e-…md` | 7 | 41 | Diagnosing a stale duplicate checkout serving port 5173 |
+| `c32289d7-…md` | 7 | 19 | Short codebase walkthrough |
+| `d177325a-…md` | 7 | 19 | Short codebase walkthrough |
+
+"Turns" counts prompts and replies only. Tool calls are noted inline where they
+happened — `_[13 tool calls: Bash]_` — but their payloads are not included.
 
 ## How these were produced
 
@@ -21,12 +27,12 @@ Claude Code stores sessions as JSONL under `~/.claude/projects/`. Those raw
 files contain **live API keys and database URLs**, so they are never copied
 verbatim. The exporter writes prompts and replies as Markdown and replaces
 every credential pattern — Anthropic keys, Neon passwords and hostnames,
-`postgresql://user:password@…` URLs, and local home paths. It refuses to
-finish if any pattern survives.
+`postgresql://user:password@…` URLs, and local home paths. It re-reads what it
+wrote and exits non-zero if any pattern survives.
 
-Tool-call payloads are summarised rather than included: they are most of the
-bytes and the least readable part. The prompts and replies are what show the
-reasoning.
+Two things are dropped as noise rather than content: tool result payloads
+(most of the bytes, none of the reasoning) and harness-injected wrappers such
+as `<ide_opened_file>` and `<system-reminder>`, which nobody typed.
 
 ## Failed attempts and corrections
 
@@ -55,6 +61,12 @@ Some of the more instructive ones:
 - **Verifying the wrong application.** Port 5173 was being served by a stale
   copy of this project elsewhere on the machine, so browser checks were running
   against a Phase-1 build.
+- **The dev server bound IPv6 only.** `http://127.0.0.1:5173` was refused and
+  Vite silently fell back to port 5174 when 5173 was busy, so the documented
+  URL pointed at nothing. Found during UI verification, not by testing.
+- **A redaction check that flagged its own output.** The exporter replaced Neon
+  passwords with `npg_REDACTED`, which matches the very pattern it asserts
+  against. The replacements are now shaped so they cannot self-match.
 - **Test-harness races mistaken for bugs.** Several browser checks failed on
   fixed waits that fired before Neon round-trips completed. Each was
   investigated rather than assumed, and the harness was fixed — not the app.

@@ -500,9 +500,15 @@ body {
 
 .app[data-rail='true'] .brand,
 .app[data-rail='true'] .new-chat span,
-.app[data-rail='true'] .sidebar-body,
 .app[data-rail='true'] .theme-toggle span {
   display: none;
+}
+
+/* Hidden, not removed: the list still grows to fill the column, which is what
+   holds the footer at the bottom. `visibility` also takes it out of the tab
+   order, so the rail has no invisible focus stops. */
+.app[data-rail='true'] .sidebar-body {
+  visibility: hidden;
 }
 
 .app[data-rail='true'] .sidebar-head {
@@ -516,9 +522,12 @@ body {
   justify-content: center;
 }
 
+/* Square, and the same footprint as the other rail icons. */
 .app[data-rail='true'] .new-chat {
   width: 36px;
+  height: 36px;
   padding: 0;
+  justify-content: center;
 }
 
 .app[data-rail='true'] .sidebar-foot {
@@ -1500,9 +1509,12 @@ body {
   /* The rail is a desktop affordance; the drawer is always full width. */
   .app[data-rail='true'] .brand,
   .app[data-rail='true'] .new-chat span,
-  .app[data-rail='true'] .sidebar-body,
   .app[data-rail='true'] .theme-toggle span {
     display: revert;
+  }
+
+  .app[data-rail='true'] .sidebar-body {
+    visibility: visible;
   }
 
   .app[data-rail='true'] .sidebar-head,
