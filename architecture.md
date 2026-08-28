@@ -1173,20 +1173,45 @@ Local development/demo
 │                                          │
 └──────────────────────────────────────────┘
 
-Cloud deployment
+Cloud deployment — as actually deployed
 
-             Internet
-                 │
-                 ▼
-          Frontend / Web App
-                 │
-                 ▼
-             FastAPI
-           ┌─────┼─────┐
-           │     │     │
-           ▼     ▼     ▼
-       Postgres Embedding Cloud LLM
-       +pgvector   API
+                        Browser
+                           │
+                           ▼
+              ┌────────────────────────┐
+              │  Vercel (static SPA)   │  built with VITE_API_BASE_URL
+              └───────────┬────────────┘
+                          │  HTTPS, CORS-checked
+                          ▼
+              ┌────────────────────────┐
+              │  Render — FastAPI      │  ALLOWED_HOSTS, structured logs
+              └───┬────────┬───────────┘
+                  │        │
+       TLS,       │        │  private network, same region
+       public     │        │  (paid instances only)
+                  ▼        ▼
+        ┌──────────────┐  ┌──────────────────────────┐
+        │ Neon         │  │ Render — Ollama          │
+        │ Postgres     │  │ (private service)        │
+        │ + pgvector   │  │ nomic-embed-text only    │
+        └──────────────┘  └──────────────────────────┘
+                  │
+                  ▼
+           Anthropic API  (generation)
+
+Three deliberate properties of this topology:
+
+* **Ollama is private.** It has no authentication, so it is a private service
+  reachable only from the API over Render's internal network — never from the
+  internet.
+* **Ollama serves embeddings, not generation.** Query embedding must happen on
+  every question, and the corpus is embedded with `nomic-embed-text` at 768
+  dimensions, so the query has to use the same model. Generation in production
+  is Claude: `llama3.1:8b` needs ~6GB resident and CPU-only inference would
+  exceed the request timeout.
+* **The Ollama *provider* stays disabled in production.** `EMBEDDING_PROVIDER`
+  and the LLM provider registry are independent, so the model picker still
+  shows Ollama greyed out with its reason while embeddings quietly work.
 
 Local startup is a Python virtualenv plus npm, wrapped by `./scripts/dev.sh`.
 There is no Docker in this implementation: the only service that would need a

@@ -1029,6 +1029,42 @@ rolled back, so the schema is migrated once per session rather than per test.
 
 ---
 
+## Troubleshooting
+
+Every entry below was actually hit while building and deploying this, not
+imagined.
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| `400 Invalid host header` on every request | `ALLOWED_HOSTS` does not contain the host the request arrived on | Set it to the bare hostname — no scheme, no trailing slash, no port |
+| `400 Disallowed CORS origin`, or the browser reports a CORS error | `CORS_ORIGINS` does not match the browser's `Origin` | Set it **with** the scheme: `https://app.example.com`. Opposite convention to `ALLOWED_HOSTS` |
+| UI says "The server returned an unreadable response" | The backend replied with plain text, not the JSON error envelope — almost always one of the two rows above, since that middleware runs before the exception handlers | Fix the host/origin value |
+| `Ollama is not reachable` | Nothing is listening at `OLLAMA_BASE_URL`. In a deployment, this is usually a network boundary rather than a wrong URL | Check the daemon is up locally; in the cloud check the services share a private network, a region, and a paid instance type |
+| Every answer returns "I don't have enough information" | Query embedding is failing, or the corpus is not embedded | `python scripts/eval_retrieval.py` — if off-corpus refusals pass but everything refuses, embeddings are down |
+| `/health` reports `degraded` | The database probe timed out | Raise `DATABASE_PROBE_TIMEOUT_SECONDS`. A managed Postgres in another region takes ~6.5s for the first pooled TLS connection; a ceiling below that makes *every* later probe fail too |
+| `Port 5173 is in use, trying another one` | A stale dev server, possibly from a different checkout | `lsof -t -iTCP:5173 -sTCP:LISTEN \| xargs kill`. `strictPort` now makes this fail loudly instead of silently moving |
+| `http://127.0.0.1:5173` refused but `localhost` works | The dev server bound IPv6 only | Already fixed with `server.host: true` in `vite.config.ts` |
+| Frontend calls `http://localhost:8000` in production | `VITE_API_BASE_URL` was not set **at build time** — Vite inlines it, so the fallback got compiled in | Set it in the host's environment and **redeploy**; a restart is not enough |
+| Alembic cannot connect but the app can | A bare `postgresql://` DSN resolving to psycopg2 | `sync_database_url` normalises this; check the driver in `DATABASE_URL` |
+
+### Reading the logs
+
+Logs are structured JSON. Every request carries a `request_id`, echoed back as
+the `x-request-id` header, so a user-reported failure can be traced to its
+exact request:
+
+```bash
+# the retrieval decision for a question
+grep retrieval_completed        # best_distance, chunks, sufficient
+grep insufficient_evidence      # the corpus could not support an answer
+
+# provider and model problems
+grep provider_status_refreshed  # which providers were available, and when
+grep request_failed             # typed application errors with their code
+```
+
+---
+
 ## Implementation status
 
 Phases follow the plan in [PRD.md](PRD.md) section 23.
