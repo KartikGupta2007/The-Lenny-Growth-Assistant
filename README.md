@@ -20,6 +20,19 @@ essay or a rendered Markdown / HTML artifact shown beside the chat.
 
 ---
 
+## Demo video and live deployment
+
+**Demo video:** [Watch the walkthrough on Google Drive](https://drive.google.com/file/d/1Gq-wj5LP6Zh7kYo2ow8LaxpSNeOEhact/view?usp=drive_link)
+
+> **Deployment availability.** The backend and self-hosted Ollama setup cannot
+> run on a free tier, so the live backend deployment is currently hosted on a
+> paid $25/month Render plan that will expire at the end of October 2026.
+> Please test the live application before then. If you are evaluating the
+> project after the deployment goes offline, review it via the demo video above
+> and this GitHub repository.
+
+---
+
 ## Documents
 
 | Document | Purpose |
